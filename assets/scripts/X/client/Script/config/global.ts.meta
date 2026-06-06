@@ -1,0 +1,12 @@
+{
+  "ver": "4.0.24",
+  "importer": "typescript",
+  "imported": true,
+  "uuid": "a71da033-1ded-49a1-b35e-24cfc178b49c",
+  "files": [],
+  "subMetas": {},
+  "userData": {
+    "moduleId": "project:///assets/Script/config/global.js",
+    "simulateGlobals": []
+  }
+}

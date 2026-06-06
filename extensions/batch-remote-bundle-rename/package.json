@@ -1,0 +1,33 @@
+﻿{
+  "package_version": 2,
+  "name": "batch-remote-bundle-rename",
+  "version": "1.0.0",
+  "description": "Batch configure selected folders as remote bundles with normalized bundle names.",
+  "author": "Codex",
+  "editor": ">=3.8.0",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "devDependencies": {
+    "@cocos/creator-types": "^3.8.6",
+    "@types/node": "^18.19.0",
+    "typescript": "^5.4.0"
+  },
+  "contributions": {
+    "assets": {
+      "menu": {
+        "methods": "./dist/assets-menu.js",
+        "assetMenu": "onAssetMenu"
+      }
+    },
+    "messages": {
+      "batch-config-remote-bundle": {
+        "methods": [
+          "batchConfigRemoteBundle"
+        ]
+      }
+    }
+  }
+}

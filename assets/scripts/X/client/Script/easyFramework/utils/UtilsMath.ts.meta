@@ -1,0 +1,12 @@
+{
+  "ver": "4.0.24",
+  "importer": "typescript",
+  "imported": true,
+  "uuid": "0ee87581-21b7-4454-8921-e08e9c7a02cf",
+  "files": [],
+  "subMetas": {},
+  "userData": {
+    "moduleId": "project:///assets/Script/utils/UtilsMath.js",
+    "simulateGlobals": []
+  }
+}
