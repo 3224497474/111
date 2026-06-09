@@ -106,7 +106,7 @@
             "_value": false
           },
           "profiler": {
-            "_value": true
+            "_value": false
           },
           "occlusion-query": {
             "_value": false
@@ -118,7 +118,7 @@
             "_value": false
           },
           "particle-2d": {
-            "_value": true
+            "_value": false
           },
           "audio": {
             "_value": true
@@ -127,7 +127,7 @@
             "_value": false
           },
           "webview": {
-            "_value": true
+            "_value": false
           },
           "tween": {
             "_value": true
@@ -145,7 +145,7 @@
             "_value": false
           },
           "tiled-map": {
-            "_value": true
+            "_value": false
           },
           "vendor-google": {
             "_value": false
@@ -170,7 +170,7 @@
             "_value": false
           },
           "marionette": {
-            "_value": true
+            "_value": false
           },
           "procedural-animation": {
             "_value": false
@@ -203,18 +203,13 @@
           "graphics",
           "intersection-2d",
           "legacy-pipeline",
-          "marionette",
           "mask",
-          "particle-2d",
           "physics-2d-builtin",
-          "profiler",
           "rich-text",
           "skeletal-animation",
           "spine-3.8",
-          "tiled-map",
           "tween",
-          "ui",
-          "webview"
+          "ui"
         ],
         "noDeprecatedFeatures": {
           "value": false,
