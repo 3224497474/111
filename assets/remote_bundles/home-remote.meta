@@ -8,6 +8,7 @@
   "userData": {
     "isBundle": true,
     "bundleName": "home",
-    "bundleConfigID": "17ZUTe1yFCLbj5LFFdkS1G"
+    "bundleConfigID": "17ZUTe1yFCLbj5LFFdkS1G",
+    "isRemoteBundle": true
   }
 }

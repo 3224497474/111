@@ -115,6 +115,12 @@ export class HLoadingScene extends Component {
     @property({ tooltip: '红点信息存储在 H.data 里的模块名。默认 redDot。' })
     public redDotStorageModuleName = 'redDot';
 
+    @property({ tooltip: 'SDK 登录、启动参数等平台会话信息存储在 H.data 里的模块名。' })
+    public sdkSessionStorageModuleName = 'platformSession';
+
+    @property({ tooltip: '是否在 Loading 开局阶段自动调用 H.sdk.login，并存储平台登录返回。' })
+    public autoSDKLogin = true;
+
     @property({ tooltip: '是否在 Loading 初始化时自动读取本地红点数据。' })
     public autoLoadRedDotLocal = true;
 
@@ -234,6 +240,32 @@ export class HLoadingScene extends Component {
                         name: this.redDotStorageModuleName.trim() || 'redDot',
                         defaultValue: {},
                     },
+                    {
+                        name: this.sdkSessionStorageModuleName.trim() || 'platformSession',
+                        defaultValue: {
+                            platform: 'unknown',
+                            login: null,
+                            updatedAt: 0,
+                        },
+                    },
+                    {
+                        name: 'remoteConfig',
+                        defaultValue: {},
+                    },
+                    {
+                        name: 'analytics',
+                        defaultValue: {
+                            events: [],
+                            updatedAt: 0,
+                        },
+                    },
+                    {
+                        name: 'reward',
+                        defaultValue: {
+                            records: {},
+                            updatedAt: 0,
+                        },
+                    },
                 ],
             },
             redDot: {
@@ -250,6 +282,15 @@ export class HLoadingScene extends Component {
                 critical: firstScreenResources,
                 preload: firstScreenPrefabs,
                 background: backgroundResources,
+            },
+            sdk: {
+                sessionStorageModuleName: this.sdkSessionStorageModuleName.trim() || 'platformSession',
+            },
+            screen: {
+                designWidth: 720,
+                designHeight: 1280,
+                fitMode: 'auto',
+                autoRefresh: true,
             },
         });
 
@@ -270,6 +311,7 @@ export class HLoadingScene extends Component {
     private async runStartupFlow(): Promise<void> {
         this.setTargetProgress(0.02, '准备启动', '初始化完成');
 
+        await this.loginPlatformIfNeeded();
         await this.loadCriticalBundles();
         await this.loadCriticalResources();
         await this.loadWarmupBundles();
@@ -282,6 +324,22 @@ export class HLoadingScene extends Component {
         await this.waitForDisplayedProgress(0.985, 1200);
 
         await this.enterHomeScene();
+    }
+
+    private async loginPlatformIfNeeded(): Promise<void> {
+        if (!this.autoSDKLogin) {
+            return;
+        }
+
+        this.setTargetProgress(0.04, '平台登录', '请求平台登录');
+        const ret = await H.sdk.login();
+        if (ret.ok) {
+            this.setTargetProgress(0.06, '平台登录', '平台登录完成');
+            return;
+        }
+
+        console.warn('[HLoadingScene] 平台登录未完成:', ret.reason, ret.errorMessage || ret.userMessage);
+        this.setTargetProgress(0.06, '平台登录', ret.userMessage || '平台登录未完成，继续进入游戏');
     }
 
     private loadCriticalBundles(): Promise<void> {

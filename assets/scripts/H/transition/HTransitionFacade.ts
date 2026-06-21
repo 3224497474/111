@@ -1,5 +1,6 @@
 import { Color, director, Graphics, Label, Node, UITransform, UIOpacity, Vec3, view } from 'cc';
-import type { HUIOpenOptions, HTransitionAnimation, HTransitionProgressSetter, HTransitionShowOptions } from '../HTypes';
+import type { HTransitionAnimation, HTransitionProgressSetter, HTransitionShowOptions } from '../HTypes';
+import type { HUIOpenOptions } from '../ui/HUITypes';
 import type { HUIFacade } from '../ui/HUIFacade';
 
 export class HTransitionFacade {

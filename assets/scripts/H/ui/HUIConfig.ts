@@ -1,35 +1,11 @@
-import type { HUIConfig } from '../HTypes';
+import type { HUIRouteConfigMap } from './HUITypes';
 
 /**
- * H 框架内置 UI 配置表。
+ * H 框架内置 UI 路由表。
  *
- * 使用方式：
- * 1. 在这里登记 UI 预制体。
- * 2. Loading 阶段调用 H.init({ uiRoot }) 后会自动注册这里的配置。
- * 3. 业务层直接 H.ui.open('ShopView')，不需要每次都写 prefabPath。
+ * 框架只提供空表和结构，具体项目在 Loading 阶段调用
+ * H.ui.registerRoutes(ProjectUIRouteConfigs) 注入自己的 UI。
  */
-export const HUIConfigs: HUIConfig[] = [
-    // 示例：
-    // {
-    //     id: 'ShopView',
-    //     type: 'page',
-    //     layer: 'layer2',
-    //     bundle: 'resources',
-    //     prefabPath: 'ui/ShopView',
-    //     scriptName: 'ShopView',
-    //     cacheMode: 'hide',
-    //     group: 'main-page',
-    //     exclusive: true,
-    //     animation: 'slide-left',
-    // },
-    // {
-    //     id: 'RewardDialog',
-    //     type: 'dialog',
-    //     layer: 'layer3',
-    //     bundle: 'resources',
-    //     prefabPath: 'ui/RewardDialog',
-    //     scriptName: 'RewardDialog',
-    //     cacheMode: 'destroy',
-    //     animation: 'fade-scale',
-    // },
-];
+export const UIRouteConfigs: HUIRouteConfigMap = {};
+
+export const HUIConfigs = UIRouteConfigs;

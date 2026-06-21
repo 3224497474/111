@@ -1,0 +1,13 @@
+{
+  "ver": "1.2.0",
+  "importer": "directory",
+  "imported": true,
+  "uuid": "df2b9296-3508-4cd4-b790-91b76ec20667",
+  "files": [],
+  "subMetas": {},
+  "userData": {
+    "isBundle": true,
+    "bundleName": "eamil",
+    "isRemoteBundle": true
+  }
+}

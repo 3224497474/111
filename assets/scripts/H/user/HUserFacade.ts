@@ -1,5 +1,5 @@
 import type { HDataStore } from '../data/HDataStore';
-import type { HPlatformFacade } from '../platform/HPlatformFacade';
+import type { HPlatformFacade } from '../sdk/platform/HPlatformFacade';
 import type { HLocationInfo, HUserProfile } from '../HTypes';
 
 interface HUserSaveData {

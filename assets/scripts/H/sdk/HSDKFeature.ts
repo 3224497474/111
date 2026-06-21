@@ -1,0 +1,89 @@
+import type { HFeatureMap, HResolvedPlatform, HSDKFeature } from '../HTypes';
+
+/**
+ * 各平台默认能力表。
+ * HSDKFacade.hasFeature 会先读这里，再允许配置中心覆盖，业务可以据此决定按钮是否展示。
+ */
+export const HSDK_FEATURES: Record<HResolvedPlatform, HFeatureMap> = {
+    wechat: {
+        login: true,
+        rewardAd: true,
+        interstitialAd: true,
+        bannerAd: true,
+        share: true,
+        favorite: false,
+        revisit: false,
+        sidebar: false,
+        shortcut: false,
+        recordVideo: false,
+        leaderboard: true,
+        payment: false,
+        customerService: true,
+    },
+    douyin: {
+        login: true,
+        rewardAd: true,
+        interstitialAd: true,
+        bannerAd: true,
+        share: true,
+        favorite: true,
+        revisit: true,
+        sidebar: true,
+        shortcut: true,
+        recordVideo: true,
+        leaderboard: true,
+        payment: false,
+        customerService: true,
+    },
+    '4399': {
+        login: true,
+        rewardAd: true,
+        interstitialAd: true,
+        bannerAd: true,
+        share: false,
+        favorite: false,
+        revisit: false,
+        sidebar: false,
+        shortcut: false,
+        recordVideo: false,
+        leaderboard: true,
+        payment: false,
+        customerService: true,
+    },
+    web: {
+        login: false,
+        rewardAd: false,
+        interstitialAd: false,
+        bannerAd: false,
+        share: true,
+        favorite: false,
+        revisit: false,
+        sidebar: false,
+        shortcut: false,
+        recordVideo: false,
+        leaderboard: false,
+        payment: false,
+        customerService: false,
+    },
+    mock: {
+        login: true,
+        rewardAd: true,
+        interstitialAd: true,
+        bannerAd: true,
+        share: true,
+        favorite: true,
+        revisit: true,
+        sidebar: true,
+        shortcut: true,
+        recordVideo: true,
+        leaderboard: true,
+        payment: true,
+        customerService: true,
+    },
+    unknown: {},
+};
+
+// 只返回默认能力，不处理远程开关；远程开关在 HSDKFacade.hasFeature 里合并。
+export function hasDefaultSDKFeature(platform: HResolvedPlatform, feature: HSDKFeature): boolean {
+    return HSDK_FEATURES[platform]?.[feature] === true;
+}

@@ -1,112 +1,266 @@
 import {
-    assetManager,
     AssetManager,
+    BlockInputEvents,
+    Color,
     Component,
-    game,
-    instantiate,
-    isValid,
+    EventTouch,
+    Graphics,
     Label,
     Node,
     Prefab,
-    resources,
-    Tween,
-    tween,
-    UIOpacity,
     UITransform,
-    Vec3,
+    UIOpacity,
     Widget,
+    assetManager,
+    game,
+    instantiate,
+    isValid,
+    resources,
 } from 'cc';
-import type {
-    HUIAnimationConfig,
-    HUIAnimationType,
-    HUICacheMode,
-    HUIConfig,
-    HUILayerName,
-    HUILifecycle,
-    HUIOpenOptions,
-    HUIRecord,
-    HUIType,
-    HUIInitOptions,
-} from '../HTypes';
-import { HBaseUI } from './HBaseUI';
+import {
+    UILayer,
+    UIRoute,
+    type HUICloseReason,
+    type HUICloseSoundPlayer,
+    type HUICacheMode,
+    type HUIConfig,
+    type HUIEvent,
+    type HUIEventListener,
+    type HUIEventType,
+    type HUILayerName,
+    type HUIOpenLoadingPolicy,
+    type HUIOpenOptions,
+    type HUIResourcePolicy,
+    type HUIRouteConfigInput,
+    type HUIRouteId,
+    type HUIType,
+    type HUIInitOptions,
+} from './HUITypes';
+import type { HEventBus } from '../core/HEventBus';
+import type { HStoreFacade } from '../store/HStoreFacade';
 import { HUIConfigs } from './HUIConfig';
 import { HUIStack } from './HUIStack';
+import { HUIViewBase } from './HUIViewBase';
 
-type HUIOpenInput = string | HUIOpenOptions;
+/**
+ * HUIFacade 是 H.ui 的唯一运行时入口，负责路由、层级、生命周期、遮罩、动画和资源缓存。
+ *
+ * 排查 UI 打开关闭问题时建议按下面的链路看：
+ * 1. open/openResolved：统一入口、单例复用、重复打开保护、慢加载提示。
+ * 2. loadCreateAndOpen/openRecord：加载 prefab、创建记录、挂层级、绑定脚本、执行打开生命周期。
+ * 3. close/closeRecord：关闭节流、二次确认、关闭动画、隐藏缓存或销毁释放。
+ * 4. createMaskForRecord/sortLayer：遮罩节点、点击遮罩关闭、同层排序。
+ * 5. retainRecordResource/releaseRecordResource：prefab 和 bundle 的引用管理。
+ */
+interface HUIRecord {
+    id: string;
+    layer: HUILayerName;
+    type: HUIType;
+    node: Node;
+    maskNode: Node | null;
+    view: HUIViewBase | null;
+    config: HUIConfig;
+    params?: any;
+    prefabAsset?: Prefab;
+    bundleName?: string;
+    bundle?: AssetManager.Bundle;
+    cacheMode: HUICacheMode;
+    group: string;
+    mutexGroup: string;
+    closing: boolean;
+    lastCloseRequestAt: number;
+    lastUsedAt: number;
+    openIndex: number;
+    operationVersion: number;
+}
+
+interface HUIOpenLoadingSession {
+    finish(): Promise<void>;
+}
+
+interface HUILoadedNode {
+    node: Node;
+    prefabAsset?: Prefab;
+    bundleName?: string;
+    bundle?: AssetManager.Bundle;
+}
+
+type HUIOpenInput = HUIRouteId | HUIOpenOptions;
 
 export class HUIFacade {
+    // root/layer/record 是 UI 框架运行态的核心数据，业务不要绕过这些状态直接挂节点。
     private root: Node | null = null;
-    private readonly layerNodes = new Map<HUILayerName, Node>();
+    private readonly layerNodes = new Map<string, Node>();
     private readonly records = new Map<string, HUIRecord>();
     private readonly configs = new Map<string, HUIConfig>();
-    private readonly loadingTasks = new Map<string, Promise<Node>>();
-    private readonly stack = new HUIStack();
-    private readonly animationBaseMap = new WeakMap<Node, { position: Vec3; scale: Vec3 }>();
-    private loadingRefCount = 0;
-    private defaultLoadingId = 'h:global_loading';
 
-    private readonly defaultLayerOrder: Record<HUILayerName, number> = {
-        layer1: 100,
-        layer2: 200,
-        layer3: 300,
-        layer4: 400,
-        transition: 500,
-        tip: 600,
+    // loadingTasks 防止同一个单例 UI 被快速重复加载；operationQueues 保证同一个 UI 的 open/close 串行执行。
+    private readonly loadingTasks = new Map<string, Promise<Node>>();
+    private readonly operationQueues = new Map<string, Promise<unknown>>();
+    private readonly openLoadingRefCounts = new Map<string, number>();
+
+    // maskRecordIds 用于从遮罩点击反查 UI；bundleRefCounts 用于 bundle 低内存和销毁释放。
+    private readonly maskRecordIds = new WeakMap<Node, string>();
+    private readonly bundleRefCounts = new Map<string, number>();
+    private readonly listeners = new Map<HUIEventType, Set<HUIEventListener>>();
+    private readonly stack = new HUIStack();
+    private closeSoundPlayer: HUICloseSoundPlayer | null = null;
+    private eventReporter: HUIEventListener | null = null;
+    private storeFacade: HStoreFacade | null = null;
+    private eventBus: HEventBus | null = null;
+    private resourcePolicy: Required<HUIResourcePolicy> = {
+        maxHiddenRecords: 8,
+        releasePrefabOnDestroy: true,
+        releaseBundleOnUnused: false,
+        lowMemoryStrategy: 'destroy-hidden',
+    };
+    private openSequence = 0;
+    private tipSeed = 0;
+    private defaultLoadingId: HUIRouteId = UIRoute.GlobalLoading;
+    private defaultOpenLoadingPolicy: HUIOpenLoadingPolicy = {
+        enabled: true,
+        delayMs: 300,
+        minShowMs: 300,
+        message: '加载中',
     };
 
+    private readonly defaultLayerOrder: Record<UILayer, number> = {
+        [UILayer.Layer1]: 100,
+        [UILayer.Layer2]: 200,
+        [UILayer.Layer3]: 300,
+        [UILayer.Layer4]: 400,
+        [UILayer.Layer5]: 500,
+        [UILayer.Guide]: 600,
+        [UILayer.Tip]: 700,
+        [UILayer.Transition]: 800,
+    };
+
+    public setStore(store: HStoreFacade | null): void {
+        this.storeFacade = store;
+    }
+
+    public setEventBus(eventBus: HEventBus | null): void {
+        this.eventBus = eventBus;
+    }
+
     /**
-     * 初始化 UI 根节点，并自动创建 layer1/layer2/layer3/layer4/transition/tip 六个层。
-     * root 建议传 Canvas 或 Canvas 下的 UIRoot，层节点会自动铺满 root。
+     * 初始化 UI 根节点和默认层级。
+     * 后续业务只需要调用 H.ui.open/close，不需要自己创建 layer 容器。
      */
     public init(root: Node, options: HUIInitOptions = {}): void {
         this.root = root;
         this.defaultLoadingId = options.defaultLoadingId || this.defaultLoadingId;
+        this.defaultOpenLoadingPolicy = this.normalizeOpenLoadingPolicy(options.openLoading, this.defaultOpenLoadingPolicy);
+        this.closeSoundPlayer = options.closeSoundPlayer || null;
+        this.eventReporter = options.eventReporter || null;
+        this.resourcePolicy = {
+            ...this.resourcePolicy,
+            ...(options.resource || {}),
+        };
 
         if (options.persistRoot && root.parent) {
             game.addPersistRootNode(root);
         }
 
         this.ensureRootTransform(root);
-        this.bindLayers(options.layerOrder);
-        this.registerConfigs(HUIConfigs);
-        this.registerConfigs(options.configs || []);
+        this.createDefaultLayers(options.layerOrder);
+        this.registerRoutes(HUIConfigs);
+        if (options.routes) {
+            this.registerRoutes(options.routes);
+        }
+        if (options.configs) {
+            this.registerRoutes(options.configs);
+        }
+
+        this.bindLowMemoryListener();
+    }
+
+    public registerRoutes(routes: HUIRouteConfigInput): void {
+        const list = Array.isArray(routes) ? routes : Object.values(routes);
+        list.forEach((config) => this.registerConfig(config));
     }
 
     public registerConfig(config: HUIConfig): void {
         const normalized = this.normalizeConfig(config);
-        this.configs.set(normalized.id, normalized);
+        this.configs.set(String(normalized.id), normalized);
     }
 
-    public registerConfigs(configs: HUIConfig[]): void {
-        configs.forEach((config) => this.registerConfig(config));
+    public registerConfigs(configs: HUIRouteConfigInput): void {
+        this.registerRoutes(configs);
     }
 
-    public unregisterConfig(id: string): void {
-        this.configs.delete(id);
+    public unregisterConfig(id: HUIRouteId): void {
+        this.configs.delete(String(id));
     }
 
-    public getConfig(id: string): HUIConfig | null {
-        const config = this.configs.get(id);
+    public getConfig(id: HUIRouteId): HUIConfig | null {
+        const config = this.configs.get(String(id));
         return config ? { ...config } : null;
     }
 
+    public on(eventName: HUIEventType, listener: HUIEventListener): void {
+        let listeners = this.listeners.get(eventName);
+        if (!listeners) {
+            listeners = new Set();
+            this.listeners.set(eventName, listeners);
+        }
+        listeners.add(listener);
+    }
+
+    public off(eventName: HUIEventType, listener: HUIEventListener): void {
+        this.listeners.get(eventName)?.delete(listener);
+    }
+
+    public async clearHiddenCache(includeKeep = false): Promise<void> {
+        const records = this.getHiddenCacheRecords(includeKeep);
+        await Promise.all(records.map((record) => this.close(record.id, true, 'force')));
+    }
+
+    public async trimHiddenCache(maxHiddenRecords = this.resourcePolicy.maxHiddenRecords, excludeId = ''): Promise<void> {
+        const records = this.getHiddenCacheRecords(false)
+            .filter((record) => record.id !== excludeId)
+            .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+        const overflow = records.length - maxHiddenRecords;
+        if (overflow <= 0) {
+            return;
+        }
+
+        const targets = records.slice(0, overflow);
+        await Promise.all(targets.map((record) => this.close(record.id, true, 'force')));
+        targets.forEach((record) => this.emitUIEvent('ui_cache_trim', record, 'cache-limit'));
+    }
+
     /**
-     * 打开 UI。支持：
-     * - H.ui.open({ id, prefabPath, layer })
-     * - H.ui.open('ShopView', { tab: 1 })，前提是先 registerConfig。
+     * UI 打开的统一入口。
+     * 这里先解析路由配置，再进入同 id 操作队列，避免快速 open/close/open 导致生命周期交叉。
      */
-    public async open(input: HUIOpenInput, params?: any): Promise<Node> {
+    public async open(input: HUIOpenInput, params?: any, openOptions: Partial<HUIOpenOptions> = {}): Promise<Node> {
         this.ensureInit();
 
-        const options = this.resolveOpenInput(input, params);
+        const options = this.resolveOpenInput(input, params, openOptions);
         const config = this.normalizeConfig(options);
-        const id = config.id;
+        const id = String(config.id);
 
+        return this.enqueueOperation(id, () => this.openResolved(config, options));
+    }
+
+    // 已完成路由解析后的真实打开流程，单例复用、重复加载保护和慢加载提示都在这里处理。
+    private async openResolved(config: HUIConfig, options: HUIOpenOptions): Promise<Node> {
+        const id = String(config.id);
         const singleton = config.singleton !== false;
-        const existing = this.getRecord(id);
+        const startedAt = Date.now();
+        this.emitUIEvent('ui_open_start', config);
+
+        const existing = this.records.get(id);
         if (existing && singleton) {
-            this.openRecord(existing, options.params, options.restorePreviousDialog);
-            return existing.node;
+            try {
+                await this.openRecord(existing, options.params);
+                this.emitUIEvent('ui_open_end', existing, undefined, Date.now() - startedAt);
+                return existing.node;
+            } catch (error) {
+                this.emitUIEvent('ui_open_fail', existing, error, Date.now() - startedAt);
+                throw error;
+            }
         }
 
         const loadingTask = this.loadingTasks.get(id);
@@ -114,157 +268,153 @@ export class HUIFacade {
             return loadingTask;
         }
 
-        const task = this.loadCreateAndOpen(config, options);
-        this.loadingTasks.set(id, task);
+        const runtimeConfig = singleton ? config : {
+            ...config,
+            id: this.createRuntimeId(id),
+        };
+        const runtimeOptions = singleton ? options : {
+            ...options,
+            id: runtimeConfig.id,
+        };
+        const task = this.loadCreateAndOpen(runtimeConfig, runtimeOptions);
+        const loadingSession = this.beginOpenLoadingSession(runtimeConfig);
+        if (singleton) {
+            this.loadingTasks.set(id, task);
+        }
+
         try {
-            return await task;
+            const node = await task;
+            const record = this.records.get(String(runtimeConfig.id));
+            this.emitUIEvent('ui_open_end', record || runtimeConfig, undefined, Date.now() - startedAt);
+            return node;
+        } catch (error) {
+            const record = this.records.get(String(runtimeConfig.id));
+            this.emitUIEvent('ui_open_fail', record || runtimeConfig, error, Date.now() - startedAt);
+            throw error;
         } finally {
+            await loadingSession?.finish().catch((error) => {
+                console.warn('[HUIFacade] UI loading 关闭失败', error);
+            });
             this.loadingTasks.delete(id);
         }
     }
 
-    public async openPage(id: string, params?: any): Promise<Node> {
-        return this.open({
-            id,
-            type: 'page',
-            layer: 'layer2',
-            params,
+    public openPage(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
+        return this.open({ ...options, id, type: 'page', layer: UILayer.Layer2, params });
+    }
+
+    public openDialog(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
+        return this.open({ ...options, id, type: 'dialog', layer: UILayer.Layer3, params });
+    }
+
+    public openGuide(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
+        return this.open({ ...options, id, type: 'guide', layer: UILayer.Guide, params, blockInput: true });
+    }
+
+    public openLoading(id: HUIRouteId = this.defaultLoadingId, params?: any): Promise<Node> {
+        const loadingId = String(id);
+        if (this.configs.has(loadingId)) {
+            return this.open({
+                id,
+                type: 'loading',
+                layer: UILayer.Transition,
+                params,
+                blockInput: true,
+                openLoading: false,
+            });
+        }
+
+        return this.showBuiltinLoading(loadingId, params);
+    }
+
+    public async showTip(messageOrId: HUIRouteId, paramsOrDuration?: any): Promise<Node> {
+        const id = String(messageOrId);
+        const hasRoute = this.configs.has(id);
+        if (hasRoute || (paramsOrDuration && typeof paramsOrDuration === 'object')) {
+            const params = paramsOrDuration && typeof paramsOrDuration === 'object'
+                ? paramsOrDuration
+                : { message: id, durationMs: paramsOrDuration };
+            return this.open({ id: messageOrId, type: 'tip', layer: UILayer.Tip, singleton: false, params });
+        }
+
+        return this.showBuiltinTip(id, paramsOrDuration);
+    }
+
+    public async refresh(id: HUIRouteId, params?: any): Promise<void> {
+        const record = this.records.get(String(id));
+        if (!record || !record.view) {
+            return;
+        }
+
+        record.params = params;
+        await record.view._hRefresh(params);
+    }
+
+    public async close(id: HUIRouteId, forceDestroy = false, reason: HUICloseReason = forceDestroy ? 'force' : 'api'): Promise<void> {
+        return this.enqueueOperation(String(id), async () => {
+            const record = this.records.get(String(id));
+            if (!record || record.closing) {
+                return;
+            }
+
+            await this.closeRecord(record, forceDestroy, reason);
         });
     }
 
-    public async openDialog(id: string, params?: any): Promise<Node> {
-        return this.open({
-            id,
-            type: 'dialog',
-            layer: 'layer3',
-            params,
-        });
+    public remove(id: HUIRouteId, reason: HUICloseReason = 'force'): Promise<void> {
+        return this.close(id, true, reason);
     }
 
-    public async openWithLoad(id: string, params?: any): Promise<Node> {
-        return this.open(id, params);
+    public async closeAllDialogs(): Promise<void> {
+        const ids = this.stack.getDialogStack().slice().reverse();
+        await Promise.all(ids.map((id) => this.close(id)));
     }
 
-    public showDialog(id: string, params?: any, callback?: (target: HUILifecycle | Node | null) => void, parent?: Node): void {
-        void this.open({
-            id,
-            type: 'dialog',
-            layer: 'layer3',
-            params,
-            parent,
-        }).then((node) => {
-            const record = this.getRecord(id);
-            callback?.(record?.script || node);
-        });
+    public async closeLayer(layer: HUILayerName): Promise<void> {
+        const layerName = String(layer);
+        const ids = [...this.records.values()]
+            .filter((record) => String(record.layer) === layerName)
+            .map((record) => record.id);
+        await Promise.all(ids.map((id) => this.close(id)));
     }
 
-    public hideDialog(id: string, callback?: () => void): void {
-        this.close(id);
-        callback?.();
+    public async closeGroup(group: string): Promise<void> {
+        const ids = [...this.records.values()]
+            .filter((record) => record.group === group)
+            .map((record) => record.id);
+        await Promise.all(ids.map((id) => this.close(id)));
     }
 
-    public pushShowDialog(id: string, params?: any, callback?: (target: HUILifecycle | Node | null) => void, parent?: Node): void {
-        void this.open({
-            id,
-            type: 'dialog',
-            layer: 'layer3',
-            params,
-            parent,
-            restorePreviousDialog: true,
-        }).then((node) => {
-            const record = this.getRecord(id);
-            callback?.(record?.script || node);
-        });
+    public get(id: HUIRouteId): Node | null {
+        return this.records.get(String(id))?.node || null;
     }
 
-    public popHideDialog(id: string, callback?: () => void): void {
-        this.close(id);
-        callback?.();
+    public getScript<T extends HUIViewBase = HUIViewBase>(id: HUIRouteId): T | null {
+        return this.records.get(String(id))?.view as T | null;
     }
 
-    public registerExisting(id: string, node: Node, config: Partial<HUIConfig> = {}): HUILifecycle | null {
-        this.ensureInit();
-        const normalized = this.normalizeConfig({
-            ...config,
-            id,
-            node: undefined,
-        } as HUIOpenOptions);
-        const record = this.createRecord(normalized, node);
-        this.records.set(record.id, record);
-        this.attachToLayer(record, config.order);
-        return record.script;
-    }
-
-    public get(id: string): Node | null {
-        return this.getRecord(id)?.node || null;
-    }
-
-    public getNode(id: string): Node | null {
-        return this.get(id);
-    }
-
-    public getScript<T extends HUILifecycle = HUILifecycle>(id: string): T | null {
-        return this.getRecord(id)?.script as T | null;
-    }
-
-    public isOpen(id: string): boolean {
-        const record = this.getRecord(id);
-        return !!record && record.node.active;
+    public isOpen(id: HUIRouteId): boolean {
+        const record = this.records.get(String(id));
+        return !!record && record.node.active && !record.closing;
     }
 
     public getOpenIds(layer?: HUILayerName): string[] {
+        const layerName = layer === undefined ? '' : String(layer);
         return [...this.records.values()]
-            .filter((record) => record.node.active && (!layer || record.layer === layer))
+            .filter((record) => record.node.active && !record.closing && (!layerName || String(record.layer) === layerName))
             .map((record) => record.id);
     }
 
-    public toggle(id: string, params?: any): void {
-        if (this.isOpen(id)) {
-            this.close(id);
-            return;
-        }
-
-        void this.open(id, params);
+    public getLayerNode(layer: HUILayerName): Node {
+        this.ensureInit();
+        return this.ensureLayerNode(String(layer));
     }
 
-    /**
-     * 关闭指定 UI。destroy 会释放节点，hide/keep 会保留节点供下次复用。
-     */
-    public close(id: string, forceDestroy = false): void {
-        const record = this.getRecord(id);
-        if (!record || record.closing) {
-            return;
-        }
-
-        this.stack.remove(id);
-        record.closing = true;
-        void this.closeRecord(record, forceDestroy);
-    }
-
-    public destroy(id: string): void {
-        this.close(id, true);
-    }
-
-    public closeTopDialog(): boolean {
-        const topDialog = this.stack.peekDialog();
-        if (!topDialog) {
-            return false;
-        }
-
-        this.close(topDialog);
-        return true;
-    }
-
+    // 返回键统一从框架调度：引导层 > layer5 弹窗 > 普通弹窗 > 页面。
     public goBack(): boolean {
-        const topDialog = this.stack.peekDialog();
-        if (topDialog && this.tryBackRecord(topDialog)) {
-            return true;
-        }
-
-        const pageStack = this.stack.getPageStack();
-        for (let i = pageStack.length - 1; i >= 0; i--) {
-            const id = pageStack[i];
-            if (this.tryBackRecord(id)) {
+        const records = this.getBackRecords();
+        for (const record of records) {
+            if (this.handleBack(record.id)) {
                 return true;
             }
         }
@@ -272,169 +422,511 @@ export class HUIFacade {
         return false;
     }
 
-    public closeLayer(layer: HUILayerName): void {
-        this.collectRecordIds((record) => record.layer === layer)
-            .forEach((id) => this.close(id));
-    }
-
-    public closeGroup(group: string): void {
-        this.collectRecordIds((record) => record.group === group)
-            .forEach((id) => this.close(id));
-    }
-
-    public closeMutexGroup(mutexGroup: string, exceptId?: string): void {
-        this.collectRecordIds((record) => record.mutexGroup === mutexGroup && record.id !== exceptId)
-            .forEach((id) => this.close(id));
-    }
-
-    /**
-     * 清理隐藏缓存。cacheMode 为 keep 的 UI 会被保留，适合主界面常驻节点。
-     */
-    public clearHiddenCache(): void {
-        this.collectRecordIds((record) => {
-            return record.cacheMode !== 'keep' && !record.node.active;
-        }).forEach((id) => this.destroy(id));
-    }
-
-    public bringToTop(id: string): void {
-        const record = this.getRecord(id);
-        if (!record || !record.node.parent) {
-            return;
-        }
-
-        record.node.setSiblingIndex(record.node.parent.children.length - 1);
-    }
-
-    public showLoading(message?: string): void {
-        this.loadingRefCount++;
-        void this.ensureLoadingVisible(message);
-    }
-
-    public hideLoading(): void {
-        if (this.loadingRefCount <= 0) {
-            this.loadingRefCount = 0;
-            this.hideLoadingRecord();
-            return;
-        }
-
-        this.loadingRefCount--;
-        if (this.loadingRefCount <= 0) {
-            this.loadingRefCount = 0;
-            this.hideLoadingRecord();
-        }
-    }
-
-    public resetLoading(): void {
-        this.loadingRefCount = 0;
-        this.hideLoadingRecord();
-    }
-
-    public async withLoading<T>(task: () => Promise<T>, message?: string): Promise<T> {
-        this.showLoading(message);
+    // 首次打开 UI 的完整链路：加载/实例化 -> 创建 record -> 挂层级 -> bind -> open。
+    private async loadCreateAndOpen(config: HUIConfig, options: HUIOpenOptions): Promise<Node> {
+        const loaded = options.node
+            ? { node: options.node } as HUILoadedNode
+            : await this.loadPrefabNode(config);
+        const node = loaded.node;
+        const record = this.createRecord(config, node, options.params);
+        record.prefabAsset = loaded.prefabAsset;
+        record.bundleName = loaded.bundleName;
+        record.bundle = loaded.bundle;
+        this.retainRecordResource(record);
         try {
-            return await task();
-        } finally {
-            this.hideLoading();
+            this.records.set(record.id, record);
+            this.attachToLayer(record, options.parent, config.order);
+            this.createMaskForRecord(record);
+            this.applyInputPolicy(record);
+            await this.bindRecord(record, options.params);
+            await this.openRecord(record, options.params);
+            return node;
+        } catch (error) {
+            this.records.delete(record.id);
+            this.destroyMask(record);
+            this.releaseRecordResource(record);
+            if (isValid(node)) {
+                node.destroy();
+            }
+            throw error;
         }
     }
 
-    public setLoadingMessage(message: string): void {
-        const record = this.getLoadingRecord();
-        if (record?.script?.setMessage) {
-            record.script.setMessage(message);
+    // record 是框架跟踪一个 UI 的最小运行时单元，后续关闭、排序、缓存都以 record 为准。
+    private createRecord(config: HUIConfig, node: Node, params?: any): HUIRecord {
+        const type = config.type || this.resolveType(config.layer);
+        const layer = config.layer || this.resolveLayer(type);
+        const group = config.group || this.resolveDefaultGroup(type, layer);
+        const record: HUIRecord = {
+            id: String(config.id),
+            layer,
+            type,
+            node,
+            maskNode: null,
+            view: null,
+            config: {
+                ...config,
+                id: String(config.id),
+                type,
+                layer,
+                group,
+            },
+            params,
+            cacheMode: config.cacheMode || this.resolveCacheMode(type),
+            group,
+            mutexGroup: config.mutexGroup || this.resolveDefaultMutexGroup(config, type, layer, group),
+            closing: false,
+            lastCloseRequestAt: 0,
+            lastUsedAt: Date.now(),
+            openIndex: ++this.openSequence,
+            operationVersion: 0,
+        };
+        record.config.cacheMode = record.cacheMode;
+        record.config.mutexGroup = record.mutexGroup;
+        return record;
+    }
+
+    // bind 只执行一次，用于把预制体脚本接入框架生命周期。
+    private async bindRecord(record: HUIRecord, params?: any): Promise<void> {
+        record.view = this.resolveView(record.node, record.config.scriptName);
+        if (!record.view) {
+            record.view = record.node.addComponent(HUIViewBase);
+        }
+
+        await record.view._hBind({
+            id: record.id,
+            config: record.config,
+            params,
+            manager: this,
+            store: this.storeFacade,
+            eventBus: this.eventBus,
+        });
+    }
+
+    // 复用缓存 UI 和新建 UI 都走这里，确保打开动画、堆栈和自动移除规则一致。
+    private async openRecord(record: HUIRecord, params?: any): Promise<void> {
+        if (record.config.exclusive !== false) {
+            await this.closeExclusivePeers(record);
+        }
+
+        record.params = params;
+        record.lastUsedAt = Date.now();
+        record.operationVersion += 1;
+        record.openIndex = ++this.openSequence;
+        this.attachToLayer(record, record.node.parent || undefined, record.config.order);
+        this.activateMask(record);
+        record.node.active = true;
+        this.sortLayer(record.layer);
+        await record.view?._hOpen(params);
+        this.pushStack(record);
+        this.scheduleAutoRemove(record.id, params);
+    }
+
+    // 关闭的唯一落点。外部 await H.ui.close(id) 时，等到这里完成才代表关闭动画和资源处理结束。
+    private async closeRecord(record: HUIRecord, forceDestroy: boolean, reason: HUICloseReason): Promise<void> {
+        const startedAt = Date.now();
+        if (!forceDestroy && this.shouldThrottleClose(record)) {
+            this.emitUIEvent('ui_close_cancel', record, 'throttle');
             return;
         }
 
-        const label = record?.node.getComponentInChildren(Label);
-        if (label) {
-            label.string = message;
+        if (!forceDestroy && record.view && !(await record.view._hCanClose(reason))) {
+            this.emitUIEvent('ui_close_cancel', record, reason);
+            return;
+        }
+
+        record.closing = true;
+        record.operationVersion += 1;
+        this.emitUIEvent('ui_close_start', record, reason);
+        this.playCloseSound(record, reason);
+        await record.view?._hClose(reason);
+        this.stack.remove(record.id);
+        record.lastUsedAt = Date.now();
+
+        const destroyAfterClose = forceDestroy || record.cacheMode === 'destroy';
+        if (destroyAfterClose) {
+            await record.view?._hRemove();
+            this.records.delete(record.id);
+            this.destroyMask(record);
+            if (isValid(record.node)) {
+                record.node.destroy();
+            }
+            this.releaseRecordResource(record);
+            this.emitUIEvent('ui_close_end', record, reason, Date.now() - startedAt);
+            return;
+        }
+
+        if (isValid(record.node)) {
+            record.node.active = false;
+        }
+        this.hideMask(record);
+        record.closing = false;
+        this.emitUIEvent('ui_close_end', record, reason, Date.now() - startedAt);
+        await this.trimHiddenCache(this.resourcePolicy.maxHiddenRecords, record.id);
+    }
+
+    // 互斥规则集中在这里：页面同层互斥，或者配置了相同 mutexGroup 的 UI 互斥。
+    private async closeExclusivePeers(target: HUIRecord): Promise<void> {
+        const ids = [...this.records.values()]
+            .filter((record) => record.id !== target.id)
+            .filter((record) => record.node.active && !record.closing)
+            .filter((record) => {
+                if (target.mutexGroup && record.mutexGroup === target.mutexGroup) {
+                    return true;
+                }
+                return target.type === 'page' && record.type === 'page' && String(record.layer) === String(target.layer);
+            })
+            .map((record) => record.id);
+
+        await Promise.all(ids.map((id) => this.close(id)));
+    }
+
+    private handleBack(id: string): boolean {
+        const record = this.records.get(id);
+        if (!record || record.closing) {
+            return false;
+        }
+
+        if (record.view?._hBack()) {
+            return true;
+        }
+
+        if (record.config.closeOnBack === false) {
+            return false;
+        }
+
+        void this.close(id, false, 'back');
+        return true;
+    }
+
+    private getBackRecords(): HUIRecord[] {
+        return [...this.records.values()]
+            .filter((record) => record.node.active && !record.closing)
+            .filter((record) => record.type === 'guide' || record.type === 'dialog' || record.type === 'page')
+            .sort((a, b) => {
+                const priorityDiff = this.resolveBackPriority(b) - this.resolveBackPriority(a);
+                if (priorityDiff !== 0) {
+                    return priorityDiff;
+                }
+
+                return b.openIndex - a.openIndex;
+            });
+    }
+
+    private resolveBackPriority(record: HUIRecord): number {
+        if (record.type === 'guide') {
+            return 400;
+        }
+
+        if (record.type === 'dialog' && String(record.layer) === UILayer.Layer5) {
+            return 300;
+        }
+
+        if (record.type === 'dialog') {
+            return 200;
+        }
+
+        if (record.type === 'page') {
+            return 100;
+        }
+
+        return 0;
+    }
+
+    private pushStack(record: HUIRecord): void {
+        if (record.type === 'page') {
+            this.stack.pushPage(record.id);
+        } else if (record.type === 'dialog') {
+            this.stack.pushDialog(record.id);
         }
     }
 
-    public setLoadingProgress(progress: number): void {
-        const record = this.getLoadingRecord();
-        record?.script?.setProgress?.(Math.max(0, Math.min(1, progress)));
+    private scheduleAutoRemove(id: string, params?: any): void {
+        const record = this.records.get(id);
+        if (!record || record.type !== 'tip') {
+            return;
+        }
+
+        const durationMs = Number(params?.durationMs ?? params?.duration ?? record.config.autoRemoveMs ?? 1500);
+        if (durationMs <= 0) {
+            return;
+        }
+
+        const targetNode = record.node;
+        setTimeout(() => {
+            const current = this.records.get(id);
+            if (current && current.node === targetNode && current.node.active) {
+                void this.remove(id, 'auto');
+            }
+        }, durationMs);
     }
 
-    /**
-     * Tip 层轻量提示。正式项目可以用 registerConfig 配置自己的 Toast 预制体。
-     */
-    public showTip(message: string, durationMs = 1500): Node {
-        this.ensureInit();
-        const tipLayer = this.getLayerNode('tip');
-        const tipNode = new Node('HTip');
-        const transform = tipNode.addComponent(UITransform);
-        transform.setContentSize(620, 64);
+    // 慢 UI 打开提示策略：超过 delayMs 才显示 Loading，并保证至少展示 minShowMs，避免闪一下。
+    private beginOpenLoadingSession(config: HUIConfig): HUIOpenLoadingSession | null {
+        const policy = this.resolveOpenLoadingPolicy(config);
+        if (!policy) {
+            return null;
+        }
 
-        const label = tipNode.addComponent(Label);
+        const loadingId = String(policy.loadingId || this.defaultLoadingId);
+        const delayMs = Math.max(0, Math.floor(policy.delayMs ?? 300));
+        const minShowMs = Math.max(0, Math.floor(policy.minShowMs ?? 300));
+        let cancelled = false;
+        let shown = false;
+        let shownAt = 0;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let showTask: Promise<void> | null = null;
+
+        timer = setTimeout(() => {
+            timer = null;
+            if (cancelled) {
+                return;
+            }
+
+            shown = true;
+            shownAt = Date.now();
+            this.retainOpenLoading(loadingId);
+            showTask = this.openLoading(loadingId, {
+                ...(policy.params || {}),
+                message: policy.message || '加载中',
+            }).then(() => undefined).catch((error) => {
+                shown = false;
+                this.releaseOpenLoadingRefOnly(loadingId);
+                console.warn('[HUIFacade] UI loading 打开失败', error);
+            });
+        }, delayMs);
+
+        return {
+            finish: async () => {
+                cancelled = true;
+                if (timer) {
+                    clearTimeout(timer);
+                    timer = null;
+                }
+
+                if (showTask) {
+                    await showTask;
+                }
+
+                if (!shown) {
+                    return;
+                }
+
+                const elapsedMs = Date.now() - shownAt;
+                const waitMs = Math.max(0, minShowMs - elapsedMs);
+                if (waitMs > 0) {
+                    await this.wait(waitMs);
+                }
+
+                await this.releaseOpenLoading(loadingId);
+            },
+        };
+    }
+
+    private resolveOpenLoadingPolicy(config: HUIConfig): HUIOpenLoadingPolicy | null {
+        if (config.type === 'loading' || config.type === 'tip' || (config as HUIOpenOptions).silent) {
+            return null;
+        }
+
+        const policy = this.normalizeOpenLoadingPolicy(config.openLoading, this.defaultOpenLoadingPolicy);
+        if (!policy.enabled) {
+            return null;
+        }
+
+        return {
+            ...policy,
+            loadingId: policy.loadingId || this.defaultLoadingId,
+        };
+    }
+
+    private normalizeOpenLoadingPolicy(
+        value: boolean | HUIOpenLoadingPolicy | undefined,
+        fallback: HUIOpenLoadingPolicy,
+    ): HUIOpenLoadingPolicy {
+        if (value === undefined) {
+            return { ...fallback };
+        }
+
+        if (typeof value === 'boolean') {
+            return {
+                ...fallback,
+                enabled: value,
+            };
+        }
+
+        return {
+            ...fallback,
+            ...value,
+            enabled: value.enabled ?? fallback.enabled,
+        };
+    }
+
+    private retainOpenLoading(loadingId: string): void {
+        const count = this.openLoadingRefCounts.get(loadingId) || 0;
+        this.openLoadingRefCounts.set(loadingId, count + 1);
+    }
+
+    private releaseOpenLoadingRefOnly(loadingId: string): void {
+        const count = this.openLoadingRefCounts.get(loadingId) || 0;
+        if (count <= 1) {
+            this.openLoadingRefCounts.delete(loadingId);
+            return;
+        }
+
+        this.openLoadingRefCounts.set(loadingId, count - 1);
+    }
+
+    private async releaseOpenLoading(loadingId: string): Promise<void> {
+        const count = this.openLoadingRefCounts.get(loadingId) || 0;
+        if (count <= 1) {
+            this.openLoadingRefCounts.delete(loadingId);
+            await this.close(loadingId);
+            return;
+        }
+
+        this.openLoadingRefCounts.set(loadingId, count - 1);
+    }
+
+    private wait(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    private async showBuiltinTip(message: string, durationMs = 1500): Promise<Node> {
+        this.ensureInit();
+        const id = `h:tip:${++this.tipSeed}`;
+        const node = new Node(id);
+        const transform = node.addComponent(UITransform);
+        transform.setContentSize(520, 72);
+
+        const label = node.addComponent(Label);
+        label.string = message;
+        label.fontSize = 30;
+        label.lineHeight = 36;
+        label.color = new Color(255, 255, 255, 255);
+
+        return this.open({
+            id,
+            type: 'tip',
+            layer: UILayer.Tip,
+            node,
+            singleton: false,
+            cacheMode: 'destroy',
+            animation: 'slide-up',
+            autoRemoveMs: durationMs,
+            params: {
+                message,
+                durationMs,
+            },
+        });
+    }
+
+    // 没有注册 loading 预制体时使用内置 Loading，保证框架永远能给用户一个加载反馈。
+    private showBuiltinLoading(id: string, params?: any): Promise<Node> {
+        const message = String(params?.message || '加载中');
+        const existing = this.records.get(id);
+        if (existing) {
+            this.updateBuiltinLoadingText(existing.node, message);
+            return this.open({
+                id,
+                type: 'loading',
+                layer: UILayer.Transition,
+                params,
+                blockInput: true,
+                cacheMode: 'keep',
+                openLoading: false,
+            });
+        }
+
+        const node = new Node(id);
+        const transform = node.addComponent(UITransform);
+        transform.setContentSize(520, 96);
+
+        const labelNode = new Node('message');
+        node.addChild(labelNode);
+        const labelTransform = labelNode.addComponent(UITransform);
+        labelTransform.setContentSize(520, 96);
+
+        const label = labelNode.addComponent(Label);
         label.string = message;
         label.fontSize = 28;
         label.lineHeight = 34;
         label.horizontalAlign = Label.HorizontalAlign.CENTER;
         label.verticalAlign = Label.VerticalAlign.CENTER;
+        label.color = new Color(255, 255, 255, 255);
 
-        tipNode.setPosition(new Vec3(0, 120, 0));
-        tipLayer.addChild(tipNode);
-
-        setTimeout(() => {
-            if (tipNode.isValid) {
-                tipNode.destroy();
-            }
-        }, Math.max(300, durationMs));
-
-        return tipNode;
-    }
-
-    public getLayerNode(layer: HUILayerName): Node {
-        this.ensureInit();
-        const layerNode = this.layerNodes.get(layer);
-        if (!layerNode) {
-            throw new Error(`[HUIFacade] 找不到 UI 层：${layer}`);
-        }
-        return layerNode;
-    }
-
-    private bindLayers(customOrder?: Partial<Record<HUILayerName, number>>): void {
-        const layerOrder = {
-            ...this.defaultLayerOrder,
-            ...(customOrder || {}),
-        };
-
-        const sortedLayers = (Object.keys(this.defaultLayerOrder) as HUILayerName[])
-            .sort((a, b) => layerOrder[a] - layerOrder[b]);
-
-        sortedLayers.forEach((layerName, index) => {
-            const layerNode = this.ensureLayerNode(layerName);
-            layerNode.setSiblingIndex(index);
-            this.layerNodes.set(layerName, layerNode);
+        return this.open({
+            id,
+            type: 'loading',
+            layer: UILayer.Transition,
+            node,
+            singleton: true,
+            cacheMode: 'keep',
+            blockInput: true,
+            animation: 'fade',
+            openLoading: false,
+            params,
         });
     }
 
-    private ensureLayerNode(layerName: HUILayerName): Node {
-        const root = this.root;
-        if (!root) {
-            throw new Error('[HUIFacade] UI 根节点不存在');
+    private updateBuiltinLoadingText(node: Node, message: string): void {
+        const label = this.findLabelDeep(node);
+        if (label) {
+            label.string = message;
+        }
+    }
+
+    private findLabelDeep(node: Node): Label | null {
+        const label = node.getComponent(Label);
+        if (label) {
+            return label;
         }
 
-        let layerNode = root.getChildByName(layerName);
-        if (!layerNode) {
-            layerNode = new Node(layerName);
-            root.addChild(layerNode);
+        for (const child of node.children) {
+            const found = this.findLabelDeep(child);
+            if (found) {
+                return found;
+            }
         }
 
-        const rootTransform = root.getComponent(UITransform);
-        let transform = layerNode.getComponent(UITransform);
-        if (!transform) {
-            transform = layerNode.addComponent(UITransform);
+        return null;
+    }
+
+    private createRuntimeId(id: string): string {
+        return `${id}#${Date.now()}#${++this.tipSeed}`;
+    }
+
+    private attachToLayer(record: HUIRecord, parent?: Node, order?: number): void {
+        const targetParent = parent || this.ensureLayerNode(String(record.layer));
+        if (record.maskNode && record.maskNode.parent !== targetParent) {
+            record.maskNode.setParent(targetParent);
         }
-        if (rootTransform) {
-            transform.setContentSize(rootTransform.contentSize);
+        if (record.node.parent !== targetParent) {
+            record.node.setParent(targetParent);
         }
 
-        let widget = layerNode.getComponent(Widget);
-        if (!widget) {
-            widget = layerNode.addComponent(Widget);
+        if (order !== undefined || record.config.order !== undefined) {
+            record.node.setSiblingIndex(order ?? record.config.order!);
         }
+        this.sortLayer(record.layer);
+    }
+
+    // 遮罩由框架统一创建，业务只配置 showMask/closeOnMask/maskOpacity，不需要手写遮罩节点。
+    private createMaskForRecord(record: HUIRecord): void {
+        if (!this.shouldCreateMask(record)) {
+            return;
+        }
+
+        if (record.maskNode && record.maskNode.isValid) {
+            return;
+        }
+
+        const maskNode = new Node(`${record.id}:mask`);
+        maskNode.active = false;
+        const transform = maskNode.addComponent(UITransform);
+        const size = this.getRootSize();
+        transform.setContentSize(size.width, size.height);
+
+        let widget = maskNode.addComponent(Widget);
         widget.isAlignLeft = true;
         widget.isAlignRight = true;
         widget.isAlignTop = true;
@@ -443,7 +935,240 @@ export class HUIFacade {
         widget.right = 0;
         widget.top = 0;
         widget.bottom = 0;
+        widget.updateAlignment();
 
+        maskNode.addComponent(BlockInputEvents);
+        maskNode.addComponent(UIOpacity).opacity = this.resolveMaskOpacity(record);
+        this.drawMask(maskNode, record);
+
+        this.maskRecordIds.set(maskNode, record.id);
+        maskNode.on(Node.EventType.TOUCH_END, this.onMaskTouch, this);
+
+        record.maskNode = maskNode;
+        const parent = record.node.parent || this.ensureLayerNode(String(record.layer));
+        maskNode.setParent(parent);
+    }
+
+    private activateMask(record: HUIRecord): void {
+        if (!this.shouldCreateMask(record)) {
+            return;
+        }
+
+        this.createMaskForRecord(record);
+        if (record.maskNode && record.maskNode.isValid) {
+            record.maskNode.active = true;
+            this.drawMask(record.maskNode, record);
+        }
+    }
+
+    private hideMask(record: HUIRecord): void {
+        if (record.maskNode && record.maskNode.isValid) {
+            record.maskNode.active = false;
+        }
+    }
+
+    private destroyMask(record: HUIRecord): void {
+        if (!record.maskNode || !record.maskNode.isValid) {
+            record.maskNode = null;
+            return;
+        }
+
+        record.maskNode.off(Node.EventType.TOUCH_END, this.onMaskTouch, this);
+        record.maskNode.destroy();
+        record.maskNode = null;
+    }
+
+    private shouldCreateMask(record: HUIRecord): boolean {
+        if (record.config.showMask !== undefined) {
+            return record.config.showMask;
+        }
+
+        return record.type === 'dialog'
+            || record.type === 'guide'
+            || record.type === 'loading';
+    }
+
+    private onMaskTouch(event?: EventTouch): void {
+        this.stopTouchPropagation(event);
+        const target = (event as any)?.currentTarget as Node | undefined;
+        if (!target) {
+            return;
+        }
+
+        const recordId = this.maskRecordIds.get(target);
+        if (!recordId) {
+            return;
+        }
+
+        const record = this.records.get(recordId);
+        if (!record || record.config.closeOnMask === false) {
+            return;
+        }
+
+        void this.close(record.id, false, 'mask');
+    }
+
+    private stopTouchPropagation(event?: EventTouch): void {
+        const maybeEvent = event as any;
+        if (maybeEvent && typeof maybeEvent.stopPropagation === 'function') {
+            maybeEvent.stopPropagation();
+        }
+    }
+
+    private drawMask(maskNode: Node, record: HUIRecord): void {
+        const graphics = maskNode.getComponent(Graphics) || maskNode.addComponent(Graphics);
+        const size = this.getRootSize();
+        const color = record.config.maskColor || { r: 0, g: 0, b: 0, a: 255 };
+        graphics.clear();
+        graphics.fillColor = new Color(color.r, color.g, color.b, color.a ?? 255);
+        graphics.rect(-size.width * 0.5, -size.height * 0.5, size.width, size.height);
+        graphics.fill();
+    }
+
+    private getRootSize(): { width: number; height: number } {
+        const transform = this.root?.getComponent(UITransform);
+        return {
+            width: Math.max(1, transform?.width || 2000),
+            height: Math.max(1, transform?.height || 2000),
+        };
+    }
+
+    private resolveMaskOpacity(record: HUIRecord): number {
+        if (record.config.maskOpacity !== undefined) {
+            return Math.max(0, Math.min(255, Math.floor(record.config.maskOpacity)));
+        }
+
+        if (record.type === 'guide') {
+            return 180;
+        }
+        if (record.type === 'loading') {
+            return 110;
+        }
+        return 140;
+    }
+
+    // 同层排序规则：先按 order/priority，再按 openIndex；遮罩永远排在对应 UI 节点前面。
+    private sortLayer(layer: HUILayerName): void {
+        const layerName = String(layer);
+        const records = [...this.records.values()]
+            .filter((record) => String(record.layer) === layerName)
+            .filter((record) => record.node.parent === this.layerNodes.get(layerName) || record.maskNode?.parent === this.layerNodes.get(layerName))
+            .sort((a, b) => {
+                const orderA = this.resolveRecordOrder(a);
+                const orderB = this.resolveRecordOrder(b);
+                if (orderA !== orderB) {
+                    return orderA - orderB;
+                }
+                return a.openIndex - b.openIndex;
+            });
+
+        let siblingIndex = 0;
+        records.forEach((record) => {
+            if (record.maskNode && record.maskNode.isValid && record.maskNode.active) {
+                record.maskNode.setSiblingIndex(siblingIndex++);
+            }
+            if (record.node.isValid && record.node.active) {
+                record.node.setSiblingIndex(siblingIndex++);
+            }
+        });
+    }
+
+    private resolveRecordOrder(record: HUIRecord): number {
+        if (record.config.order !== undefined) {
+            return record.config.order;
+        }
+
+        const priority = record.config.priority ?? this.resolveDefaultPriority(record);
+        return priority * 100000 + record.openIndex;
+    }
+
+    private resolveDefaultPriority(record: HUIRecord): number {
+        switch (record.type) {
+            case 'guide':
+                return 60;
+            case 'loading':
+                return 70;
+            case 'tip':
+                return 80;
+            case 'dialog':
+                return record.layer === UILayer.Layer5 ? 50 : 30;
+            case 'page':
+                return 10;
+            default:
+                return 20;
+        }
+    }
+
+    private shouldThrottleClose(record: HUIRecord): boolean {
+        const throttleMs = Math.max(0, Math.floor(record.config.closeThrottleMs ?? 300));
+        if (throttleMs <= 0) {
+            return false;
+        }
+
+        const now = Date.now();
+        if (now - record.lastCloseRequestAt < throttleMs) {
+            return true;
+        }
+
+        record.lastCloseRequestAt = now;
+        return false;
+    }
+
+    // 关闭音效由框架统一触发，业务只配置 closeSound，具体播放函数在 init 注入。
+    private playCloseSound(record: HUIRecord, reason: HUICloseReason): void {
+        if (!record.config.closeSound || !this.closeSoundPlayer) {
+            return;
+        }
+
+        try {
+            this.closeSoundPlayer(record.config.closeSound, reason, record.config);
+        } catch (error) {
+            console.warn('[HUIFacade] closeSoundPlayer 执行失败', error);
+        }
+    }
+
+    private applyInputPolicy(record: HUIRecord): void {
+        if (!record.config.blockInput) {
+            return;
+        }
+
+        if (!record.node.getComponent(BlockInputEvents)) {
+            record.node.addComponent(BlockInputEvents);
+        }
+    }
+
+    // 初始化时创建所有标准 UI 层，后续 layer1-layer5/tip/guide/transition 都复用这些节点。
+    private createDefaultLayers(customOrder?: HUIInitOptions['layerOrder']): void {
+        const entries = (Object.values(UILayer) as UILayer[])
+            .map((layer) => ({
+                layer,
+                order: customOrder?.[layer] ?? this.defaultLayerOrder[layer],
+            }))
+            .sort((a, b) => a.order - b.order);
+
+        entries.forEach((entry, index) => {
+            const node = this.ensureLayerNode(entry.layer);
+            node.setSiblingIndex(index);
+        });
+    }
+
+    private ensureLayerNode(layerName: string): Node {
+        if (this.layerNodes.has(layerName)) {
+            return this.layerNodes.get(layerName)!;
+        }
+
+        if (!this.root) {
+            throw new Error('[HUIFacade] 请先调用 H.ui.init(root)');
+        }
+
+        let layerNode = this.root.getChildByName(layerName);
+        if (!layerNode) {
+            layerNode = new Node(layerName);
+            this.root.addChild(layerNode);
+        }
+
+        this.ensureLayerTransform(layerNode);
+        this.layerNodes.set(layerName, layerNode);
         return layerNode;
     }
 
@@ -453,567 +1178,178 @@ export class HUIFacade {
         }
     }
 
-    private async loadCreateAndOpen(config: HUIConfig, options: HUIOpenOptions): Promise<Node> {
-        const node = options.node || await this.loadPrefabNode(config);
-        const record = this.createRecord(config, node);
-        this.records.set(record.id, record);
-        this.openRecord(record, options.params, options.restorePreviousDialog, options.parent);
-        return node;
+    private ensureLayerTransform(node: Node): void {
+        if (!node.getComponent(UITransform)) {
+            node.addComponent(UITransform);
+        }
+
+        let widget = node.getComponent(Widget);
+        if (!widget) {
+            widget = node.addComponent(Widget);
+        }
+
+        widget.isAlignLeft = true;
+        widget.isAlignRight = true;
+        widget.isAlignTop = true;
+        widget.isAlignBottom = true;
+        widget.left = 0;
+        widget.right = 0;
+        widget.top = 0;
+        widget.bottom = 0;
+        widget.updateAlignment();
     }
 
-    private createRecord(config: HUIConfig, node: Node): HUIRecord {
-        const script = this.resolveScript(node, config.scriptName);
-        this.bindScriptContext(script, config.id, config);
-
-        return {
-            id: config.id,
-            layer: config.layer || this.resolveLayer(config),
-            type: config.type || this.resolveType(config.layer),
-            node,
-            mutexGroup: config.mutexGroup || '',
-            group: config.group,
-            cacheMode: config.cacheMode || this.resolveCacheMode(config),
-            prefabPath: config.prefabPath,
-            bundle: config.bundle,
-            config,
-            script,
-            blockBack: config.blockBack,
-            loaded: false,
-            closing: false,
-        };
-    }
-
-    private openRecord(record: HUIRecord, params?: any, restorePreviousDialog?: boolean, parent?: Node): void {
-        record.closing = false;
-        this.stopAnimations(record.node);
-        this.attachToLayer(record, record.config.order, parent);
-
-        if (record.mutexGroup) {
-            this.closeMutexGroup(record.mutexGroup, record.id);
-        }
-        if (record.config.exclusive) {
-            this.closeExclusivePeers(record);
-        }
-
-        if (record.type === 'page') {
-            this.stack.pushPage(record.id);
-        } else if (record.type === 'dialog') {
-            if (restorePreviousDialog) {
-                this.hideCurrentTopDialog(record.id);
-            }
-            this.stack.pushDialog(record.id);
-        }
-
-        record.params = params ?? null;
-        this.showScript(record, record.params);
-        this.bringToTop(record.id);
-        void this.playOpenAnimation(record);
-    }
-
-    private attachToLayer(record: HUIRecord, order?: number, parent?: Node): void {
-        const layerNode = parent || this.getLayerNode(record.layer);
-        if (record.node.parent !== layerNode) {
-            record.node.setParent(layerNode);
-        }
-
-        if (typeof order === 'number') {
-            record.node.setSiblingIndex(order);
-            return;
-        }
-
-        record.node.setSiblingIndex(layerNode.children.length - 1);
-    }
-
-    private closeExclusivePeers(targetRecord: HUIRecord): void {
-        this.collectRecordIds((record) => {
-            if (record.id === targetRecord.id || !record.node.active) {
-                return false;
-            }
-            if (record.layer !== targetRecord.layer || record.type !== targetRecord.type) {
-                return false;
-            }
-            if (targetRecord.group && record.group !== targetRecord.group) {
-                return false;
-            }
-            return true;
-        }).forEach((id) => this.close(id));
-    }
-
-    private hideCurrentTopDialog(nextDialogId: string): void {
-        const topDialogId = this.stack.peekDialog();
-        if (!topDialogId || topDialogId === nextDialogId) {
-            return;
-        }
-
-        const record = this.getRecord(topDialogId);
-        if (record?.node.active) {
-            this.hideScript(record);
-        }
-    }
-
-    private restorePreviousDialog(): void {
-        const topDialogId = this.stack.peekDialog();
-        if (!topDialogId) {
-            return;
-        }
-
-        const record = this.getRecord(topDialogId);
-        if (!record || record.node.active) {
-            return;
-        }
-
-        this.showScript(record, record.params);
-    }
-
-    private tryBackRecord(id: string): boolean {
-        const record = this.getRecord(id);
-        if (!record) {
-            return false;
-        }
-
-        if (record.script?.onUIBack?.()) {
-            return true;
-        }
-
-        if (record.blockBack) {
-            return false;
-        }
-
-        this.close(id);
-        return true;
-    }
-
-    private async closeRecord(record: HUIRecord, forceDestroy: boolean): Promise<void> {
-        const shouldDestroy = forceDestroy || record.cacheMode === 'destroy';
-        this.runCloseLifecycleBeforeAnimation(record, shouldDestroy);
-
-        try {
-            await this.playCloseAnimation(record);
-        } finally {
-            if (!isValid(record.node)) {
-                this.records.delete(record.id);
-                return;
-            }
-
-            this.stopAnimations(record.node);
-            this.restoreBaseTransform(record.node);
-            record.closing = false;
-
-            if (shouldDestroy) {
-                record.node.destroy();
-                this.records.delete(record.id);
-            } else {
-                record.node.active = false;
-            }
-
-            if (record.type === 'dialog') {
-                this.restorePreviousDialog();
-            }
-        }
-    }
-
-    private runCloseLifecycleBeforeAnimation(record: HUIRecord, destroyAfterClose: boolean): void {
-        const script = record.script;
-        if (!script) {
-            return;
-        }
-
-        script.uiStatus = 'hiding';
-        if (destroyAfterClose) {
-            script.onUIClose?.();
-        } else {
-            script.onUIHide?.();
-        }
-    }
-
-    private showScript(record: HUIRecord, params?: any): void {
-        const script = record.script;
-        if (!script) {
-            record.node.active = true;
-            return;
-        }
-
-        script.uiParams = params ?? null;
-        if (typeof script.openUI === 'function') {
-            script.openUI(params);
-            record.loaded = true;
-            return;
-        }
-
-        if (!record.loaded) {
-            record.loaded = true;
-            script.onUILoad?.(params);
-        } else if (record.node.active) {
-            script.onUIRefresh?.(params);
-        }
-
-        script.uiStatus = 'opening';
-        script.onUIOpen?.(params);
-        record.node.active = true;
-        script.show?.(params);
-        script.updateInfo?.();
-        script.uiStatus = 'opened';
-        script.onUIShow?.();
-    }
-
-    private hideScript(record: HUIRecord): void {
-        const script = record.script;
-        if (!script) {
-            record.node.active = false;
-            return;
-        }
-
-        if (typeof script.hideUI === 'function') {
-            script.hideUI();
-            return;
-        }
-
-        script.uiStatus = 'hiding';
-        script.onUIHide?.();
-        script.hide?.();
-        record.node.active = false;
-        script.uiStatus = 'closed';
-    }
-
-    private playOpenAnimation(record: HUIRecord): Promise<void> {
-        const config = this.resolveAnimationConfig(record);
-        const animation = config.open || 'none';
-        const duration = config.openDuration ?? config.duration ?? this.getDefaultAnimationDuration(record);
-        if (animation === 'none' || duration <= 0 || !isValid(record.node)) {
-            this.restoreBaseTransform(record.node);
-            this.ensureOpacity(record.node).opacity = 255;
-            return Promise.resolve();
-        }
-
-        const base = this.captureBaseTransform(record.node);
-        const opacity = this.ensureOpacity(record.node);
-        this.stopAnimations(record.node);
-        this.prepareOpenAnimation(record.node, opacity, animation, base, config.distance ?? 96);
-
-        return new Promise((resolve) => {
-            tween(record.node)
-                .to(duration, {
-                    position: base.position,
-                    scale: base.scale,
-                }, {
-                    easing: 'backOut',
-                })
-                .call(() => {
-                    this.restoreBaseTransform(record.node);
-                    resolve();
-                })
-                .start();
-
-            tween(opacity)
-                .to(duration, {
-                    opacity: 255,
-                }, {
-                    easing: 'quadOut',
-                })
-                .start();
-        });
-    }
-
-    private playCloseAnimation(record: HUIRecord): Promise<void> {
-        const config = this.resolveAnimationConfig(record);
-        const animation = config.close || config.open || 'none';
-        const duration = config.closeDuration ?? config.duration ?? this.getDefaultAnimationDuration(record);
-        if (animation === 'none' || duration <= 0 || !isValid(record.node)) {
-            return Promise.resolve();
-        }
-
-        const base = this.captureBaseTransform(record.node);
-        const opacity = this.ensureOpacity(record.node);
-        const target = this.getCloseAnimationTarget(record.node, animation, base, config.distance ?? 96);
-        this.stopAnimations(record.node);
-
-        return new Promise((resolve) => {
-            tween(record.node)
-                .to(duration, {
-                    position: target.position,
-                    scale: target.scale,
-                }, {
-                    easing: 'quadIn',
-                })
-                .call(() => resolve())
-                .start();
-
-            tween(opacity)
-                .to(duration, {
-                    opacity: target.opacity,
-                }, {
-                    easing: 'quadIn',
-                })
-                .start();
-        });
-    }
-
-    private resolveAnimationConfig(record: HUIRecord): Required<Pick<HUIAnimationConfig, 'open' | 'close'>> & HUIAnimationConfig {
-        const raw = record.config.animation;
-        const defaultAnimation = this.getDefaultAnimationType(record);
-        if (!raw) {
-            return {
-                open: defaultAnimation,
-                close: defaultAnimation,
-            };
-        }
-
-        if (typeof raw === 'string') {
-            return {
-                open: raw,
-                close: raw,
-            };
-        }
-
-        return {
-            ...raw,
-            open: raw.open || defaultAnimation,
-            close: raw.close || raw.open || defaultAnimation,
-        };
-    }
-
-    private getDefaultAnimationType(record: HUIRecord): HUIAnimationType {
-        if (record.type === 'dialog') {
-            return 'fade-scale';
-        }
-        if (record.type === 'page') {
-            return 'fade';
-        }
-        if (record.type === 'loading' || record.type === 'tip') {
-            return 'fade';
-        }
-        return 'none';
-    }
-
-    private getDefaultAnimationDuration(record: HUIRecord): number {
-        if (record.type === 'dialog') {
-            return 0.18;
-        }
-        if (record.type === 'page') {
-            return 0.14;
-        }
-        return 0.12;
-    }
-
-    private prepareOpenAnimation(
-        node: Node,
-        opacity: UIOpacity,
-        animation: HUIAnimationType,
-        base: { position: Vec3; scale: Vec3 },
-        distance: number,
-    ): void {
-        opacity.opacity = this.animationUsesFade(animation) ? 0 : 255;
-        node.setPosition(this.getSlideStartPosition(animation, base.position, distance));
-        if (animation === 'scale' || animation === 'fade-scale') {
-            node.setScale(base.scale.x * 0.86, base.scale.y * 0.86, base.scale.z);
-        } else {
-            node.setScale(base.scale.x, base.scale.y, base.scale.z);
-        }
-    }
-
-    private getCloseAnimationTarget(
-        node: Node,
-        animation: HUIAnimationType,
-        base: { position: Vec3; scale: Vec3 },
-        distance: number,
-    ): { position: Vec3; scale: Vec3; opacity: number } {
-        const position = this.getSlideEndPosition(animation, base.position, distance);
-        const scale = (animation === 'scale' || animation === 'fade-scale')
-            ? new Vec3(base.scale.x * 0.88, base.scale.y * 0.88, base.scale.z)
-            : new Vec3(base.scale.x, base.scale.y, base.scale.z);
-        const opacity = this.animationUsesFade(animation) ? 0 : this.ensureOpacity(node).opacity;
-
-        return {
-            position,
-            scale,
-            opacity,
-        };
-    }
-
-    private getSlideStartPosition(animation: HUIAnimationType, base: Vec3, distance: number): Vec3 {
-        switch (animation) {
-            case 'slide-up':
-                return new Vec3(base.x, base.y - distance, base.z);
-            case 'slide-down':
-                return new Vec3(base.x, base.y + distance, base.z);
-            case 'slide-left':
-                return new Vec3(base.x + distance, base.y, base.z);
-            case 'slide-right':
-                return new Vec3(base.x - distance, base.y, base.z);
-            default:
-                return new Vec3(base.x, base.y, base.z);
-        }
-    }
-
-    private getSlideEndPosition(animation: HUIAnimationType, base: Vec3, distance: number): Vec3 {
-        switch (animation) {
-            case 'slide-up':
-                return new Vec3(base.x, base.y + distance, base.z);
-            case 'slide-down':
-                return new Vec3(base.x, base.y - distance, base.z);
-            case 'slide-left':
-                return new Vec3(base.x - distance, base.y, base.z);
-            case 'slide-right':
-                return new Vec3(base.x + distance, base.y, base.z);
-            default:
-                return new Vec3(base.x, base.y, base.z);
-        }
-    }
-
-    private animationUsesFade(animation: HUIAnimationType): boolean {
-        return animation === 'fade'
-            || animation === 'fade-scale'
-            || animation === 'slide-up'
-            || animation === 'slide-down'
-            || animation === 'slide-left'
-            || animation === 'slide-right';
-    }
-
-    private captureBaseTransform(node: Node): { position: Vec3; scale: Vec3 } {
-        const cached = this.animationBaseMap.get(node);
-        if (cached) {
-            return {
-                position: cached.position.clone(),
-                scale: cached.scale.clone(),
-            };
-        }
-
-        const base = {
-            position: node.position.clone(),
-            scale: node.scale.clone(),
-        };
-        this.animationBaseMap.set(node, base);
-        return {
-            position: base.position.clone(),
-            scale: base.scale.clone(),
-        };
-    }
-
-    private restoreBaseTransform(node: Node): void {
-        const base = this.animationBaseMap.get(node);
-        if (!base || !isValid(node)) {
-            return;
-        }
-
-        node.setPosition(base.position);
-        node.setScale(base.scale);
-        this.ensureOpacity(node).opacity = 255;
-    }
-
-    private ensureOpacity(node: Node): UIOpacity {
-        let opacity = node.getComponent(UIOpacity);
-        if (!opacity) {
-            opacity = node.addComponent(UIOpacity);
-        }
-        return opacity;
-    }
-
-    private stopAnimations(node: Node): void {
-        Tween.stopAllByTarget(node);
-        const opacity = node.getComponent(UIOpacity);
-        if (opacity) {
-            Tween.stopAllByTarget(opacity);
-        }
-    }
-
-    private closeScript(record: HUIRecord): void {
-        const script = record.script;
-        if (!script) {
-            record.node.active = false;
-            return;
-        }
-
-        if (typeof script.closeUI === 'function') {
-            script.closeUI();
-            return;
-        }
-
-        script.onUIClose?.();
-        script.hide?.();
-        record.node.active = false;
-        script.uiStatus = 'closed';
-    }
-
-    private bindScriptContext(script: HUILifecycle | null, id: string, config: HUIConfig): void {
-        if (!script) {
-            return;
-        }
-
-        if (typeof script.bindUIContext === 'function') {
-            script.bindUIContext(id, config);
-            return;
-        }
-
-        script.uiId = id;
-        script.uiPanelId = id;
-        script.dialogPath = id;
-        script.uiConfig = config;
-    }
-
-    private resolveScript(node: Node, scriptName?: string): HUILifecycle | null {
+    private resolveView(node: Node, scriptName?: string): HUIViewBase | null {
         if (scriptName) {
-            const namedScript = node.getComponent(scriptName as any) as HUILifecycle | null;
-            if (namedScript) {
-                return namedScript;
+            const target = node.getComponent(scriptName as any);
+            if (target instanceof HUIViewBase) {
+                return target;
             }
         }
 
-        const baseUI = node.getComponent(HBaseUI);
-        if (baseUI) {
-            return baseUI;
+        const direct = node.getComponent(HUIViewBase);
+        if (direct) {
+            return direct;
         }
 
-        const components = node.getComponents(Component) as Array<Component & HUILifecycle>;
-        return components.find((component) => {
-            return typeof component.openUI === 'function'
-                || typeof component.onUIOpen === 'function'
-                || typeof component.show === 'function'
-                || typeof component.bindUIContext === 'function';
-        }) ?? null;
+        const components = node.getComponents(Component);
+        for (const component of components) {
+            if (component instanceof HUIViewBase) {
+                return component;
+            }
+        }
+
+        return null;
     }
 
-    private loadPrefabNode(config: HUIConfig): Promise<Node> {
-        const prefabPath = config.prefabPath?.trim();
+    // prefab/bundle 引用计数只在框架层维护，避免业务关闭 UI 时忘记释放资源。
+    private retainRecordResource(record: HUIRecord): void {
+        if (record.prefabAsset && this.resourcePolicy.releasePrefabOnDestroy) {
+            const maybeAsset = record.prefabAsset as any;
+            if (typeof maybeAsset.addRef === 'function') {
+                maybeAsset.addRef();
+            }
+        }
+
+        if (record.bundleName && record.bundleName !== 'resources') {
+            const count = this.bundleRefCounts.get(record.bundleName) || 0;
+            this.bundleRefCounts.set(record.bundleName, count + 1);
+        }
+    }
+
+    private releaseRecordResource(record: HUIRecord): void {
+        if (record.prefabAsset && this.resourcePolicy.releasePrefabOnDestroy) {
+            const maybeAsset = record.prefabAsset as any;
+            if (typeof maybeAsset.decRef === 'function') {
+                maybeAsset.decRef();
+            } else {
+                assetManager.releaseAsset(record.prefabAsset);
+            }
+            this.emitUIEvent('ui_resource_release', record, 'prefab');
+        }
+
+        if (record.bundleName && record.bundleName !== 'resources') {
+            this.releaseBundleRef(record.bundleName, record.bundle);
+        }
+
+        record.prefabAsset = undefined;
+        record.bundleName = undefined;
+        record.bundle = undefined;
+    }
+
+    private releaseBundleRef(bundleName: string, bundle?: AssetManager.Bundle): void {
+        const count = this.bundleRefCounts.get(bundleName) || 0;
+        if (count > 1) {
+            this.bundleRefCounts.set(bundleName, count - 1);
+            return;
+        }
+
+        this.bundleRefCounts.delete(bundleName);
+        if (this.resourcePolicy.releaseBundleOnUnused && bundle) {
+            assetManager.removeBundle(bundle);
+        }
+    }
+
+    private getHiddenCacheRecords(includeKeep: boolean): HUIRecord[] {
+        return [...this.records.values()]
+            .filter((record) => !record.node.active && !record.closing)
+            .filter((record) => record.cacheMode === 'hide' || (includeKeep && record.cacheMode === 'keep'))
+            .filter((record) => record.type !== 'loading' && record.type !== 'tip');
+    }
+
+    // 低内存时按策略清理隐藏缓存，keep 缓存是否清理由 resource.lowMemoryStrategy 决定。
+    private bindLowMemoryListener(): void {
+        const eventName = (game as any).EVENT_LOW_MEMORY;
+        if (!eventName) {
+            return;
+        }
+
+        game.off(eventName, this.onLowMemory, this);
+        game.on(eventName, this.onLowMemory, this);
+    }
+
+    private onLowMemory(): void {
+        void this.handleLowMemory();
+    }
+
+    private async handleLowMemory(): Promise<void> {
+        switch (this.resourcePolicy.lowMemoryStrategy) {
+            case 'destroy-hidden':
+                await this.clearHiddenCache(false);
+                break;
+            case 'destroy-hidden-and-keep':
+                await this.clearHiddenCache(true);
+                break;
+            case 'none':
+            default:
+                break;
+        }
+    }
+
+    // 资源加载只支持两条路径：resources 或指定 bundle，方便快速定位资源路径问题。
+    private loadPrefabNode(config: HUIConfig): Promise<HUILoadedNode> {
+        const prefabPath = config.prefabPath;
         if (!prefabPath) {
-            throw new Error(`[HUIFacade] ${config.id} 需要 node 或 prefabPath`);
+            return Promise.reject(new Error(`[HUIFacade] ${String(config.id)} 缺少 prefabPath 或 node`));
         }
 
-        return this.loadPrefab(config.bundle, prefabPath).then((prefab) => instantiate(prefab));
-    }
-
-    private async loadPrefab(bundleName: string | undefined, prefabPath: string): Promise<Prefab> {
+        const bundleName = config.bundle;
         if (!bundleName || bundleName === 'resources') {
-            return this.loadResourcesPrefab(prefabPath);
+            return new Promise((resolve, reject) => {
+                resources.load(prefabPath, Prefab, (err, prefab) => {
+                    if (err || !prefab) {
+                        reject(err || new Error(`[HUIFacade] 预制体加载失败：resources/${prefabPath}`));
+                        return;
+                    }
+                    resolve({
+                        node: instantiate(prefab),
+                        prefabAsset: prefab,
+                        bundleName: 'resources',
+                    });
+                });
+            });
         }
 
-        const bundle = await this.loadBundle(bundleName);
-        return new Promise((resolve, reject) => {
+        return this.loadBundle(bundleName).then((bundle) => new Promise<HUILoadedNode>((resolve, reject) => {
             bundle.load(prefabPath, Prefab, (err, prefab) => {
                 if (err || !prefab) {
                     reject(err || new Error(`[HUIFacade] 预制体加载失败：${bundleName}/${prefabPath}`));
                     return;
                 }
-                resolve(prefab);
+                resolve({
+                    node: instantiate(prefab),
+                    prefabAsset: prefab,
+                    bundleName,
+                    bundle,
+                });
             });
-        });
-    }
-
-    private loadResourcesPrefab(prefabPath: string): Promise<Prefab> {
-        return new Promise((resolve, reject) => {
-            resources.load(prefabPath, Prefab, (err, prefab) => {
-                if (err || !prefab) {
-                    reject(err || new Error(`[HUIFacade] 预制体加载失败：resources/${prefabPath}`));
-                    return;
-                }
-                resolve(prefab);
-            });
-        });
+        }));
     }
 
     private loadBundle(bundleName: string): Promise<AssetManager.Bundle> {
-        const existing = assetManager.getBundle(bundleName);
-        if (existing) {
-            return Promise.resolve(existing);
+        const cached = assetManager.getBundle(bundleName);
+        if (cached) {
+            return Promise.resolve(cached);
         }
 
         return new Promise((resolve, reject) => {
@@ -1027,255 +1363,182 @@ export class HUIFacade {
         });
     }
 
-    private resolveOpenInput(input: HUIOpenInput, params?: any): HUIOpenOptions {
-        if (typeof input !== 'string') {
-            return input;
+    // 兼容两种打开方式：传路由 id 使用注册配置，或直接传 HUIOpenOptions 临时配置。
+    private resolveOpenInput(input: HUIOpenInput, params?: any, openOptions: Partial<HUIOpenOptions> = {}): HUIOpenOptions {
+        if (typeof input === 'string') {
+            const registered = this.configs.get(input);
+            if (!registered) {
+                throw new Error(`[HUIFacade] UI 路由未注册：${input}`);
+            }
+            return {
+                ...registered,
+                ...openOptions,
+                id: input,
+                params: openOptions.params ?? params,
+            };
         }
 
-        const registered = this.configs.get(input);
+        const id = String(input.id);
+        const registered = this.configs.get(id);
         return {
-            ...(registered || this.inferConfig(input)),
-            id: input,
-            params,
+            ...registered,
+            ...input,
+            ...openOptions,
+            id,
+            params: openOptions.params ?? input.params ?? params,
         };
     }
 
+    // 统一补齐默认值，保证后续流程不用到处判断 layer/type/cache/mask 等缺省配置。
     private normalizeConfig(config: HUIConfig): HUIConfig {
-        const id = config.id?.trim();
+        const id = String(config.id || '').trim();
         if (!id) {
             throw new Error('[HUIFacade] UI id 不能为空');
         }
 
-        const registered = this.configs.get(id);
-        const merged = {
-            ...this.inferConfig(id),
-            ...(registered || {}),
+        const type = config.type || this.resolveType(config.layer);
+        const layer = config.layer || this.resolveLayer(type);
+        const cacheMode = config.cacheMode || this.resolveCacheMode(type);
+        const group = config.group || this.resolveDefaultGroup(type, layer);
+        return {
             ...config,
             id,
-        };
-
-        const layer = merged.layer || this.resolveLayer(merged);
-        const type = merged.type || this.resolveType(layer);
-        const group = merged.group || this.resolveDefaultGroup(type, layer);
-        const mutexGroup = merged.mutexGroup || this.resolveDefaultMutexGroup(merged, type, layer, group);
-
-        return {
-            ...merged,
-            layer,
             type,
+            layer,
+            cacheMode,
             group,
-            mutexGroup,
-            prefabPath: merged.prefabPath || this.inferPrefabPath(id),
-            bundle: merged.bundle || this.inferBundleName(id),
-            cacheMode: merged.cacheMode || this.resolveCacheMode({ ...merged, type }),
-            exclusive: merged.exclusive ?? this.resolveDefaultExclusive(type),
-            blockBack: merged.blockBack ?? this.resolveDefaultBlockBack(type, layer),
-            singleton: merged.singleton ?? true,
+            singleton: config.singleton ?? type !== 'tip',
+            exclusive: config.exclusive ?? type === 'page',
+            blockInput: config.blockInput ?? (type === 'dialog' || type === 'guide' || type === 'loading'),
+            showMask: config.showMask ?? (type === 'dialog' || type === 'guide' || type === 'loading'),
+            closeOnMask: config.closeOnMask ?? type === 'dialog',
+            closeOnBack: config.closeOnBack ?? (type === 'dialog' || type === 'page' || type === 'guide'),
+            closeOnBgClose: config.closeOnBgClose ?? true,
+            closeThrottleMs: config.closeThrottleMs ?? 300,
+            closeStopPropagation: config.closeStopPropagation ?? true,
+            mutexGroup: config.mutexGroup || this.resolveDefaultMutexGroup(config, type, layer, group),
         };
     }
 
-    private inferConfig(id: string): HUIConfig {
-        const bundle = this.inferBundleName(id);
-        const prefabPath = this.inferPrefabPath(id);
-        return {
-            id,
-            bundle,
-            prefabPath,
-        };
-    }
-
-    private inferBundleName(id: string): string | undefined {
-        const separatorIndex = id.indexOf('|');
-        if (separatorIndex > 0) {
-            return id.slice(0, separatorIndex);
-        }
-        return undefined;
-    }
-
-    private inferPrefabPath(id: string): string {
-        const separatorIndex = id.indexOf('|');
-        if (separatorIndex > 0) {
-            return id.slice(separatorIndex + 1);
-        }
-        return id;
-    }
-
-    private resolveLayer(config: Partial<HUIConfig>): HUILayerName {
-        if (config.layer) {
-            return config.layer;
-        }
-
-        switch (config.type) {
+    private resolveLayer(type: HUIType): HUILayerName {
+        switch (type) {
             case 'page':
-                return 'layer2';
+                return UILayer.Layer2;
             case 'dialog':
-                return 'layer3';
-            case 'loading':
-                return 'transition';
+                return UILayer.Layer3;
             case 'tip':
-                return 'tip';
+                return UILayer.Tip;
+            case 'guide':
+                return UILayer.Guide;
+            case 'loading':
+                return UILayer.Transition;
             default:
-                return 'layer2';
+                return UILayer.Layer3;
         }
     }
 
     private resolveType(layer?: HUILayerName): HUIType {
         switch (layer) {
-            case 'layer1':
-            case 'layer2':
+            case UILayer.Layer1:
+            case UILayer.Layer2:
                 return 'page';
-            case 'layer3':
-            case 'layer4':
-                return 'dialog';
-            case 'transition':
-                return 'loading';
-            case 'tip':
+            case UILayer.Tip:
                 return 'tip';
+            case UILayer.Guide:
+                return 'guide';
+            case UILayer.Transition:
+                return 'loading';
             default:
-                return 'custom';
+                return 'dialog';
+        }
+    }
+
+    private resolveCacheMode(type: HUIType): HUICacheMode {
+        switch (type) {
+            case 'page':
+            case 'loading':
+            case 'guide':
+                return 'keep';
+            case 'tip':
+            case 'dialog':
+            default:
+                return 'destroy';
         }
     }
 
     private resolveDefaultGroup(type: HUIType, layer: HUILayerName): string {
-        if (type === 'page') {
-            return layer === 'layer1' ? 'main' : 'sub';
-        }
-        if (type === 'dialog') {
-            return 'popup';
-        }
-        if (type === 'loading') {
-            return 'loading';
-        }
-        if (type === 'tip') {
-            return 'tip';
-        }
-        return layer;
+        return `${type}:${String(layer)}`;
     }
 
     private resolveDefaultMutexGroup(config: HUIConfig, type: HUIType, layer: HUILayerName, group: string): string {
         if (config.mutexGroup) {
             return config.mutexGroup;
         }
+
         if (type === 'page') {
-            return `${layer}:${group}`;
+            return `page:${String(layer)}`;
         }
-        return '';
+
+        return group;
     }
 
-    private resolveDefaultExclusive(type: HUIType): boolean {
-        return type === 'page';
-    }
-
-    private resolveDefaultBlockBack(type: HUIType, layer: HUILayerName): boolean {
-        return type === 'page' && layer === 'layer1';
-    }
-
-    private resolveCacheMode(config: Partial<HUIConfig>): HUICacheMode {
-        if (config.cacheMode) {
-            return config.cacheMode;
-        }
-        if (config.type === 'page' || config.type === 'loading' || config.type === 'tip') {
-            return 'hide';
-        }
-        return 'destroy';
-    }
-
-    private collectRecordIds(predicate: (record: HUIRecord) => boolean): string[] {
-        const ids: string[] = [];
-        this.records.forEach((record) => {
-            if (predicate(record)) {
-                ids.push(record.id);
+    // 每个 UI id 一条队列，所有打开/关闭动作串行执行，避免异步动画和资源状态互相打架。
+    private enqueueOperation<T>(id: string, task: () => Promise<T>): Promise<T> {
+        const previous = this.operationQueues.get(id) || Promise.resolve();
+        const current = previous
+            .catch(() => undefined)
+            .then(task);
+        const queue = current.catch(() => undefined).finally(() => {
+            if (this.operationQueues.get(id) === queue) {
+                this.operationQueues.delete(id);
             }
         });
-        return ids;
+
+        this.operationQueues.set(id, queue);
+
+        return current;
     }
 
-    private getRecord(id: string): HUIRecord | null {
-        const record = this.records.get(id);
-        if (!record) {
-            return null;
+    // UI 事件统一从这里发出，便于埋点、性能统计和线上排查打开失败/关闭失败。
+    private emitUIEvent(eventName: HUIEventType, target: HUIRecord | HUIConfig, reasonOrError?: unknown, durationMs?: number): void {
+        const record = this.isRecord(target) ? target : null;
+        const config = record ? record.config : target;
+        const event: HUIEvent = {
+            name: eventName,
+            id: String(config.id),
+            type: config.type,
+            layer: config.layer,
+            timestamp: Date.now(),
+            config,
+        };
+
+        if (durationMs !== undefined) {
+            event.durationMs = durationMs;
         }
 
-        if (!isValid(record.node)) {
-            this.records.delete(id);
-            this.stack.remove(id);
-            return null;
+        if (eventName.endsWith('_fail')) {
+            event.error = reasonOrError;
+        } else if (reasonOrError !== undefined) {
+            event.reason = String(reasonOrError);
         }
 
-        return record;
-    }
-
-    private async ensureLoadingVisible(message?: string): Promise<void> {
-        const registered = this.configs.get(this.defaultLoadingId);
-        if (registered) {
-            await this.open({
-                ...registered,
-                type: 'loading',
-                layer: registered.layer || 'transition',
-                cacheMode: registered.cacheMode || 'keep',
-                params: { message },
-            });
-            this.setLoadingMessage(message || '加载中');
-            return;
+        try {
+            this.eventReporter?.(event);
+        } catch (error) {
+            console.warn('[HUIFacade] eventReporter 执行失败', error);
         }
 
-        const record = this.getOrCreateDefaultLoadingRecord();
-        record.node.active = true;
-        this.setLoadingMessage(message || '加载中');
-    }
-
-    private hideLoadingRecord(): void {
-        const record = this.getLoadingRecord();
-        if (record) {
-            this.hideScript(record);
-        }
-    }
-
-    private getLoadingRecord(): HUIRecord | null {
-        const registered = this.getRecord(this.defaultLoadingId);
-        if (registered) {
-            return registered;
-        }
-
-        let result: HUIRecord | null = null;
-        this.records.forEach((record) => {
-            if (record.type === 'loading' && !result) {
-                result = record;
+        this.listeners.get(eventName)?.forEach((listener) => {
+            try {
+                listener(event);
+            } catch (error) {
+                console.warn('[HUIFacade] UI 事件监听执行失败', error);
             }
         });
-        return result;
     }
 
-    private getOrCreateDefaultLoadingRecord(): HUIRecord {
-        const existing = this.getRecord(this.defaultLoadingId);
-        if (existing) {
-            return existing;
-        }
-
-        const node = new Node(this.defaultLoadingId);
-        const transform = node.addComponent(UITransform);
-        transform.setContentSize(520, 96);
-
-        const label = node.addComponent(Label);
-        label.string = '加载中';
-        label.fontSize = 28;
-        label.lineHeight = 34;
-        label.horizontalAlign = Label.HorizontalAlign.CENTER;
-        label.verticalAlign = Label.VerticalAlign.CENTER;
-
-        node.active = false;
-        const config = this.normalizeConfig({
-            id: this.defaultLoadingId,
-            type: 'loading',
-            layer: 'transition',
-            cacheMode: 'keep',
-            prefabPath: '',
-            singleton: true,
-        });
-        const record = this.createRecord(config, node);
-        this.records.set(record.id, record);
-        this.attachToLayer(record);
-        return record;
+    private isRecord(target: HUIRecord | HUIConfig): target is HUIRecord {
+        return (target as HUIRecord).node !== undefined;
     }
 
     private ensureInit(): void {
