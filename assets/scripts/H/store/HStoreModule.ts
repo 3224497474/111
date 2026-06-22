@@ -28,6 +28,17 @@ export class HStoreModule<TState extends HStoreState = HStoreState> {
         return this.store.getValue<TValue>(this.name, path, defaultValue);
     }
 
+    /**
+     * 轻量读取字段值，不做深拷贝。
+     *
+     * @param path 类型 string，作用是模块内字段路径。
+     * @param defaultValue 类型 TValue，作用是字段不存在时返回的默认值。
+     * @returns 类型 TValue，读取到的字段值或默认值。
+     */
+    public readValue<TValue>(path: string, defaultValue?: TValue): TValue {
+        return this.store.readValue<TValue>(this.name, path, defaultValue);
+    }
+
     public setValue<TValue>(path: string, value: TValue, options: HStoreSetOptions = {}): void {
         this.store.setValue<TValue>(this.name, path, value, options);
     }

@@ -149,6 +149,24 @@ export class HStoreFacade {
         return value === undefined ? this.clone(defaultValue) : this.clone(value as TValue);
     }
 
+    /**
+     * 轻量读取字段值，不做 JSON 深拷贝。
+     *
+     * 说明：
+     * - 适合 VM、UI 绑定这类高频只读路径。
+     * - 如果读取到的是对象或数组，调用方必须当作只读引用使用。
+     *
+     * @param name 类型 string，作用是 Store 模块名。
+     * @param path 类型 string，作用是模块内字段路径。
+     * @param defaultValue 类型 TValue，作用是字段不存在时返回的默认值。
+     * @returns 类型 TValue，读取到的字段值或默认值。
+     */
+    public readValue<TValue>(name: string, path: string, defaultValue?: TValue): TValue {
+        const record = this.ensureRecord(name, {});
+        const value = this.readPath(record.state, path);
+        return value === undefined ? defaultValue as TValue : value as TValue;
+    }
+
     public setValue<TValue>(name: string, path: string, value: TValue, options: HStoreSetOptions = {}): void {
         const record = this.ensureRecord(name, {});
         const previous = this.clone(record.state);

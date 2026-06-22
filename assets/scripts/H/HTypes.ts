@@ -1,6 +1,7 @@
 import type { Asset, Node } from 'cc';
 import type { HStoreInitOptions } from './store/HStoreTypes';
 import type { HUIInitOptions } from './ui/HUITypes';
+import type { HVMInitOptions } from './vm/HVMTypes';
 
 export type HPlatformType = 'auto' | 'wechat' | 'douyin' | '4399' | 'web' | 'mock';
 export type HResolvedPlatform = 'wechat' | 'douyin' | '4399' | 'web' | 'mock' | 'unknown';
@@ -16,6 +17,7 @@ export interface HInitOptions {
     ui?: HUIInitOptions;
     data?: HDataInitOptions;
     store?: HStoreInitOptions;
+    vm?: HVMInitOptions;
     redDot?: HRedDotInitOptions;
     platform?: HPlatformInitOptions;
     ad?: HAdInitConfig;

@@ -1,6 +1,7 @@
 import type { Node } from 'cc';
 import type { HEventBus } from '../core/HEventBus';
 import type { HStoreFacade } from '../store/HStoreFacade';
+import type { HUIBindingConfig } from './binding/HUIBindingTypes';
 
 /**
  * UI 框架公共类型集中在这里。
@@ -178,6 +179,8 @@ export interface HUIConfig {
     autoRemoveMs?: number;
     openLoading?: boolean | HUIOpenLoadingPolicy;
     modelWatches?: HUIModelWatchConfig[];
+    dataBindings?: HUIBindingConfig[];
+    dataBindingDebug?: boolean;
 }
 
 export interface HUIOpenOptions extends HUIConfig {

@@ -10,6 +10,19 @@ export { HStoreFacade } from './store/HStoreFacade';
 export { HStoreModule } from './store/HStoreModule';
 export { HModel } from './store/HModel';
 export * from './store/HStoreTypes';
+export { HVMFacade, HVMModel } from './vm';
+export * from './vm/HVMTypes';
+export {
+    HVMBase,
+    HVMLabel,
+    HVMList,
+    HVMListItem,
+    HVMProgress,
+    HVMState,
+    HVMStateCondition,
+    HVMStateConditionEnum,
+} from './vm/components';
+export type { HVMListItemRenderer } from './vm/components';
 export { HUIFacade } from './ui/HUIFacade';
 export * from './ui/HUITypes';
 export { HUIViewBase } from './ui/HUIViewBase';
@@ -23,6 +36,13 @@ export { HUIStack } from './ui/HUIStack';
 export { HUIConfigs, UIRouteConfigs } from './ui/HUIConfig';
 export { HUITabBar, HUITabRouter } from './ui/tab';
 export * from './ui/tab/HUITabTypes';
+export {
+    HUIBindingAdapter,
+    HUIBindingComponent,
+    HUIBindingPath,
+    HUIBindingWatcher,
+} from './ui/binding';
+export * from './ui/binding/HUIBindingTypes';
 export { HRedDotFacade } from './redDot/HRedDotFacade';
 export { HRedDotIcon } from './redDot/HRedDotIcon';
 export { HPlatformFacade } from './sdk/platform/HPlatformFacade';

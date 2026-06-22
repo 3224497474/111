@@ -16,6 +16,9 @@ import type { HEventNameLike, HEventPayload } from '../core/HEventNames';
 import type { HStoreFacade } from '../store/HStoreFacade';
 import type { HStoreChange, HStoreSetOptions, HStoreState, HStoreWatchOptions } from '../store/HStoreTypes';
 import type { HUIFacade } from './HUIFacade';
+import { HUIBindingComponent } from './binding/HUIBindingComponent';
+import { HUIBindingWatcher } from './binding/HUIBindingWatcher';
+import type { HUIBindingConfig } from './binding/HUIBindingTypes';
 
 const { ccclass } = _decorator;
 
@@ -60,6 +63,8 @@ export class HUIViewBase<TParams = any> extends Component {
     private readonly autoModelUnwatchers: Array<() => void> = [];
     private readonly storeUnwatchers: Array<() => void> = [];
     private readonly pendingStoreChanges: HStoreChange[] = [];
+    private readonly manualDataBindings: HUIBindingConfig[] = [];
+    private bindingWatcher: HUIBindingWatcher | null = null;
     private cleanupSeed = 0;
     private readonly lifecycleCleanups = new Map<number, HUILifecycleCleanup>();
     private readonly eventCleanupIds = new Map<HEventId, number>();
@@ -84,6 +89,7 @@ export class HUIViewBase<TParams = any> extends Component {
         this.captureBaseTransform();
         this.bindBgClose();
         await this.onBind(context);
+        this.setupDataBindings();
         this.uiStatus = 'closed';
     }
 
@@ -104,6 +110,7 @@ export class HUIViewBase<TParams = any> extends Component {
         this.node.active = true;
 
         this.connectAutoModelWatches();
+        this.startDataBindings();
         await this.onOpen(this.params);
         await this.playOpenAnimation();
 
@@ -165,6 +172,7 @@ export class HUIViewBase<TParams = any> extends Component {
 
         await this._hDisable();
         this.disconnectAutoModelWatches();
+        this.stopDataBindings();
         this.nextLifeVersion();
         this.uiStatus = 'closing';
         await this.onClose(reason);
@@ -181,6 +189,8 @@ export class HUIViewBase<TParams = any> extends Component {
 
         this.unbindBgClose();
         this.clearStoreWatchers();
+        this.stopDataBindings();
+        this.clearDataBindings();
         this.clearLifecycleCleanups('remove', true);
         await this.onRemove();
         this.nextLifeVersion();
@@ -382,6 +392,47 @@ export class HUIViewBase<TParams = any> extends Component {
         this.store?.setValue<TValue>(moduleName, path, value, options);
     }
 
+    /**
+     * 声明当前 UI 的数据绑定。
+     *
+     * @returns 类型 HUIBindingConfig[]，作用是把 Store 字段绑定到 UI 节点。
+     */
+    protected getDataBindings(): HUIBindingConfig[] {
+        return [];
+    }
+
+    /**
+     * 手动追加一条数据绑定。
+     *
+     * @param binding 类型 HUIBindingConfig，作用是声明 module/path 与目标节点的绑定关系。
+     */
+    protected addDataBinding(binding: HUIBindingConfig): void {
+        this.manualDataBindings.push(binding);
+        this.setupDataBindings();
+    }
+
+    /**
+     * 手动刷新数据绑定。
+     *
+     * @param moduleName 类型 string | undefined，作用是指定 Store 模块；不传则刷新全部。
+     * @param paths 类型 string | string[] | undefined，作用是指定字段路径；不传则刷新模块全部绑定。
+     */
+    protected refreshDataBindings(moduleName?: string, paths?: string | string[]): void {
+        this.bindingWatcher?.refresh(moduleName, paths);
+    }
+
+    /**
+     * 通过绑定体系写入 Store 字段。
+     *
+     * @param moduleName 类型 string，作用是 Store 模块名。
+     * @param path 类型 string，作用是模块内字段路径。
+     * @param value 类型 TValue，作用是要写入的字段值。
+     * @param options 类型 HStoreSetOptions，作用是 Store 写入选项。
+     */
+    protected setBindingValue<TValue>(moduleName: string, path: string, value: TValue, options: HStoreSetOptions = {}): void {
+        this.setModelValue(moduleName, path, value, options);
+    }
+
     // 生命周期钩子区：子类只重写这些方法，不直接依赖 Cocos onLoad/start 承载业务 UI 流程。
     protected onBind(_context: HUIViewBindContext<TParams>): void | Promise<void> {}
 
@@ -443,6 +494,8 @@ export class HUIViewBase<TParams = any> extends Component {
     protected onDestroy(): void {
         this.unbindBgClose();
         this.clearStoreWatchers();
+        this.stopDataBindings();
+        this.clearDataBindings();
         this.clearLifecycleCleanups('remove', true);
         this.nextLifeVersion();
         this.uiStatus = 'destroyed';
@@ -600,6 +653,65 @@ export class HUIViewBase<TParams = any> extends Component {
         }
         this.pendingStoreChanges.length = 0;
         this.storeRefreshScheduled = false;
+    }
+
+    private setupDataBindings(): void {
+        if (!this.store) {
+            return;
+        }
+
+        const bindings = this.collectDataBindings();
+        if (bindings.length <= 0) {
+            this.bindingWatcher?.stop();
+            this.bindingWatcher = null;
+            return;
+        }
+
+        if (!this.bindingWatcher) {
+            this.bindingWatcher = new HUIBindingWatcher(this.node, this.store, {
+                owner: this.uiId || this.node.name,
+                debug: this.config?.dataBindingDebug === true,
+            });
+        }
+
+        this.bindingWatcher.setBindings(bindings);
+        if (this.uiStatus === 'opened' || this.uiStatus === 'refreshing') {
+            this.bindingWatcher.start();
+        }
+    }
+
+    private startDataBindings(): void {
+        if (!this.bindingWatcher) {
+            this.setupDataBindings();
+        }
+        this.bindingWatcher?.start();
+    }
+
+    private stopDataBindings(): void {
+        this.bindingWatcher?.stop();
+    }
+
+    private clearDataBindings(): void {
+        this.bindingWatcher?.stop();
+        this.bindingWatcher = null;
+        this.manualDataBindings.length = 0;
+    }
+
+    private collectDataBindings(): HUIBindingConfig[] {
+        const fromRoute = this.config?.dataBindings || [];
+        const fromCode = this.getDataBindings();
+        const fromManual = this.manualDataBindings;
+        const fromComponents = this.node
+            .getComponentsInChildren(HUIBindingComponent)
+            .map((component) => component.toBindingConfig())
+            .filter((binding): binding is HUIBindingConfig => !!binding);
+
+        return [
+            ...fromRoute,
+            ...fromCode,
+            ...fromManual,
+            ...fromComponents,
+        ];
     }
 
     private setParams(params?: TParams): void {

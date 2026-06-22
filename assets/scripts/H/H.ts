@@ -15,6 +15,7 @@ import { HSessionTimer } from './session/HSessionTimer';
 import { HTransitionFacade } from './transition/HTransitionFacade';
 import { HUIFacade } from './ui/HUIFacade';
 import { HUserFacade } from './user/HUserFacade';
+import { HVMFacade } from './vm/HVMFacade';
 
 export class H {
     public static readonly event = new HEventBus();
@@ -33,6 +34,7 @@ export class H {
     public static readonly sdk = new HSDKFacade();
     public static readonly screen = new HScreenFacade();
     public static readonly reward = new HRewardFacade();
+    public static readonly vm = new HVMFacade();
 
     private static initialized = false;
 
@@ -42,6 +44,7 @@ export class H {
     public static init(options: HInitOptions = {}): void {
         this.data.init(options.data);
         this.store.init(options.store, this.data);
+        this.vm.init(this.store, options.vm);
         this.platform.init(options.platform);
         this.config.init(options.config, this.data, this.platform);
         this.session.init(options.session);
