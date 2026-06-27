@@ -1,5 +1,5 @@
 import { _decorator } from 'cc';
-import { HUIViewBase } from './HUIViewBase';
+import { HUIBase } from './HUIBase';
 
 const { ccclass } = _decorator;
 
@@ -8,4 +8,4 @@ const { ccclass } = _decorator;
  * 项目脚本可以继承 HBaseUI，也可以按语义继承 HPageView/HDialogView 等类。
  */
 @ccclass('HBaseUI')
-export class HBaseUI<TParams = any> extends HUIViewBase<TParams> {}
+export class HBaseUI<TParams = any> extends HUIBase<TParams> {}

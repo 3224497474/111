@@ -4,36 +4,40 @@ export { HEventBus } from './core/HEventBus';
 export type { HEventId, HEventListenOptions, HEventListener, HEventSubscriptionInfo } from './core/HEventBus';
 export { HEventName } from './core/HEventNames';
 export type { HEventNameLike, HEventPayload, HEventPayloadMap } from './core/HEventNames';
+export { HLifecycleScope } from './core/HLifecycleScope';
+export type {
+    HLifecycleAddOptions,
+    HLifecycleClearScope,
+    HLifecycleDisposableLike,
+    HLifecycleDispose,
+    HLifecycleKind,
+    HLifecycleRecordInfo,
+} from './core/HLifecycleScope';
 export { HDataStore } from './data/HDataStore';
 export { HDataModule } from './data/HDataModule';
 export { HStoreFacade } from './store/HStoreFacade';
 export { HStoreModule } from './store/HStoreModule';
 export { HModel } from './store/HModel';
 export * from './store/HStoreTypes';
-export { HVMFacade, HVMModel } from './vm';
-export * from './vm/HVMTypes';
-export {
-    HVMBase,
-    HVMLabel,
-    HVMList,
-    HVMListItem,
-    HVMProgress,
-    HVMState,
-    HVMStateCondition,
-    HVMStateConditionEnum,
-} from './vm/components';
-export type { HVMListItemRenderer } from './vm/components';
 export { HUIFacade } from './ui/HUIFacade';
 export * from './ui/HUITypes';
 export { HUIViewBase } from './ui/HUIViewBase';
+export { HUIBase } from './ui/HUIBase';
 export { HBaseUI } from './ui/HBaseUI';
+export { HLayer1View } from './ui/HLayer1View';
+export { HLayer2View } from './ui/HLayer2View';
+export { HDialogLayerView } from './ui/HDialogLayerView';
+export { HTipLayerView } from './ui/HTipLayerView';
+export { HRewardLayerView } from './ui/HRewardLayerView';
+export { HGuideLayerView } from './ui/HGuideLayerView';
+export { HErrorLayerView } from './ui/HErrorLayerView';
 export { HPageView } from './ui/HPageView';
 export { HDialogView } from './ui/HDialogView';
 export { HTipView } from './ui/HTipView';
 export { HGuideView } from './ui/HGuideView';
 export { HLoadingView } from './ui/HLoadingView';
 export { HUIStack } from './ui/HUIStack';
-export { HUIConfigs, UIRouteConfigs } from './ui/HUIConfig';
+export { HUI, defineUIConfig, HUIConfigs, UIRouteConfigs } from './ui/HUIConfig';
 export { HUITabBar, HUITabRouter } from './ui/tab';
 export * from './ui/tab/HUITabTypes';
 export {
@@ -72,4 +76,4 @@ export { HRewardFacade } from './reward/HRewardFacade';
 export { HResourceFacade } from './resource/HResourceFacade';
 export { HDefaultResourceProfile } from './resource/HResourceProfile';
 export { HTransitionFacade } from './transition/HTransitionFacade';
-export { HLoadingScene, HLoadingBundleItem, HLoadingResourceItem, HLoadingAssetType } from './loading/HLoadingScene';
+export { HLoading as HLoadingScene, HLoadingBundleItem, HLoadingResourceItem, HLoadingAssetType } from './loading/HLoading';

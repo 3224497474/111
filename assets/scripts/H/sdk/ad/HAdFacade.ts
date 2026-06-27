@@ -27,6 +27,9 @@ import { HDouyinAdAdapter, HMockAdAdapter, HWechatAdAdapter } from './HAdAdapter
  * 4. HAdAdapter：真正调用微信/抖音广告对象并归一化 close/error 回调。
  * 5. recordAd/trackAd：本地统计和 analytics 上报，方便对照平台后台数据。
  */
+const PLATFORM_RETRY_ERROR_CODE = '2002';
+const PLATFORM_RETRY_AFTER_MS = 30000;
+
 const DEFAULT_AD_CONFIG: HAdInitConfig = {
     platform: 'auto',
     rewardTimeoutMs: 15000,
@@ -60,6 +63,7 @@ export class HAdFacade {
     private lastRewardAt = 0;
     private lastRewardRequestAt = 0;
     private lastInterstitialAt = 0;
+    private readonly platformRetryUntil: Record<string, number> = {};
     private stats: HAdStats = this.createEmptyStats();
 
     /**
@@ -99,6 +103,7 @@ export class HAdFacade {
         this.lastRewardAt = 0;
         this.lastRewardRequestAt = 0;
         this.lastInterstitialAt = 0;
+        Object.keys(this.platformRetryUntil).forEach((key) => delete this.platformRetryUntil[key]);
         this.stats = this.createEmptyStats();
     }
 
@@ -182,21 +187,22 @@ export class HAdFacade {
         }
 
         let shown = false;
-        let touchedPlatform = false;
+        let shouldMarkCooldown = false;
         try {
-            touchedPlatform = true;
             const ret = await this.withRewardTimeout(
                 this.adapter.showReward(normalizedPlacement, adUnitId, rawPlacement),
                 normalizedPlacement,
                 rawPlacement,
             );
+            this.markPlatformRetryIfNeeded('reward', normalizedPlacement, ret);
             shown = ret.shown;
+            shouldMarkCooldown = ret.shown || ret.rewarded || this.isPlatformRetryResult(ret);
             const normalizedRet = this.normalizeRewardResult(ret);
             this.recordRewardResult(normalizedRet);
             cb?.(normalizedRet);
             return normalizedRet;
         } finally {
-            this.markRewardEnd(requestId, shown, normalizedPlacement, touchedPlatform);
+            this.markRewardEnd(requestId, shown, normalizedPlacement, shouldMarkCooldown);
         }
     }
 
@@ -218,7 +224,7 @@ export class HAdFacade {
         const normalizedPlacement = this.normalizePlacement(placement);
         this.recordRequest('interstitial', normalizedPlacement);
 
-        const guardReason = this.canShowInterstitial();
+        const guardReason = this.canShowInterstitial(normalizedPlacement);
         if (guardReason) {
             const ret = this.showFail('interstitial', normalizedPlacement, guardReason);
             this.recordShowResult(ret);
@@ -239,19 +245,22 @@ export class HAdFacade {
         }
 
         this.showingInterstitial = true;
-        let touchedPlatform = false;
+        let shouldMarkShownInterval = false;
         try {
-            touchedPlatform = true;
-            const ret = this.normalizeShowResult(await this.adapter.showInterstitial(normalizedPlacement, adUnitId));
+            const rawRet = await this.adapter.showInterstitial(normalizedPlacement, adUnitId);
+            this.markPlatformRetryIfNeeded('interstitial', normalizedPlacement, rawRet);
+            const ret = this.normalizeShowResult(rawRet);
+            shouldMarkShownInterval = ret.ok || ret.shown;
             this.recordShowResult(ret);
             return ret;
         } catch (err) {
             const ret = this.showFail('interstitial', normalizedPlacement, 'platform-error', err);
+            this.markPlatformRetryIfNeeded('interstitial', normalizedPlacement, ret);
             this.recordShowResult(ret);
             return ret;
         } finally {
             this.showingInterstitial = false;
-            if (touchedPlatform) {
+            if (shouldMarkShownInterval) {
                 this.lastInterstitialAt = Date.now();
             }
         }
@@ -311,6 +320,12 @@ export class HAdFacade {
         return this.platform;
     }
 
+    // 广告播放期间平台会暂停游戏逻辑；iOS 可能额外触发 onHide/onShow，业务可用这个状态过滤误判。
+    public isShowingAd(): boolean {
+        this.ensureInit();
+        return this.showingReward || this.showingInterstitial;
+    }
+
     private ensureInit(): void {
         if (!this.initialized) {
             this.init();
@@ -359,10 +374,14 @@ export class HAdFacade {
         return platformIds?.banner?.[placement] || '';
     }
 
-    // 激励频控：同时只允许一个广告流程，且同 placement 遵守 intervalMs。
+    // 激励频控：同时只允许一个广告流程；遇到官方 2002 时，强制至少 30 秒后再碰平台 API。
     private canShowReward(placement: string): HAdFailReason | null {
         if (this.showingReward || this.showingInterstitial) {
             return 'busy';
+        }
+
+        if (this.isInPlatformRetry('reward', placement)) {
+            return 'frequency-limit';
         }
 
         const intervalMs = this.config.reward?.intervalMs ?? 0;
@@ -399,11 +418,15 @@ export class HAdFacade {
     }
 
     // 插屏频控：避免刚进游戏、刚看完激励、或刚展示过插屏时重复弹出。
-    private canShowInterstitial(): HAdFailReason | null {
+    // 2002 属于官方明确要求的请求过频错误，单独进入 30 秒平台冷却，不再把普通失败误记为成功展示间隔。
+    private canShowInterstitial(placement: string): HAdFailReason | null {
         const now = Date.now();
         const policy = this.config.interstitial || {};
         if (this.showingReward || this.showingInterstitial) {
             return 'busy';
+        }
+        if (this.isInPlatformRetry('interstitial', placement)) {
+            return 'frequency-limit';
         }
         if (now - this.createdAt < (policy.launchDelayMs || 0)) {
             return 'cooldown';
@@ -415,6 +438,29 @@ export class HAdFacade {
             return 'cooldown';
         }
         return null;
+    }
+
+    private isInPlatformRetry(type: HAdType, placement: string): boolean {
+        const until = this.platformRetryUntil[this.getPlatformRetryKey(type, placement)] || 0;
+        return Date.now() < until;
+    }
+
+    private markPlatformRetryIfNeeded(type: HAdType, placement: string, ret: { reason?: HAdFailReason; errorCode?: string | number; raw?: unknown }): void {
+        if (!this.isPlatformRetryResult(ret)) {
+            return;
+        }
+        this.platformRetryUntil[this.getPlatformRetryKey(type, placement)] = Date.now() + PLATFORM_RETRY_AFTER_MS;
+    }
+
+    private isPlatformRetryResult(ret: { reason?: HAdFailReason; errorCode?: string | number; raw?: unknown }): boolean {
+        const directCode = `${ret.errorCode || ''}`;
+        const raw = ret.raw as any;
+        const rawCode = `${raw?.errCode ?? raw?.errno ?? raw?.errorCode ?? raw?.code ?? ''}`;
+        return ret.reason === 'frequency-limit' || directCode === PLATFORM_RETRY_ERROR_CODE || rawCode === PLATFORM_RETRY_ERROR_CODE;
+    }
+
+    private getPlatformRetryKey(type: HAdType, placement: string): string {
+        return `ad-platform-retry:${type}:${placement}`;
     }
 
     // 防止平台广告 close/error 回调丢失导致业务 Promise 永远不结束。
@@ -730,7 +776,7 @@ export class HAdFacade {
             case 'no-fill':
                 return '暂无广告，请稍后再试';
             case 'frequency-limit':
-                return '广告请求过于频繁，请稍后再试';
+                return '广告请求过于频繁，请至少 30 秒后再试';
             default:
                 return '广告暂不可用，请稍后再试';
         }

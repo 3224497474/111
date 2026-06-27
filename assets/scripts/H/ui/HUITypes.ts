@@ -19,8 +19,11 @@ export enum UILayer {
     Layer3 = 'layer3',
     Layer4 = 'layer4',
     Layer5 = 'layer5',
+    Dialog = 'dialog',
+    Reward = 'reward',
     Tip = 'tip',
     Guide = 'guide',
+    Error = 'error',
     Transition = 'transition',
 }
 
@@ -34,7 +37,7 @@ export type HUILayerName = UILayer | string;
 export type HUICacheMode = 'destroy' | 'hide' | 'keep';
 
 // type 决定默认层级、默认动画、默认遮罩和默认缓存策略。
-export type HUIType = 'page' | 'dialog' | 'tip' | 'loading' | 'guide' | 'custom';
+export type HUIType = 'page' | 'dialog' | 'tip' | 'loading' | 'guide' | 'reward' | 'error' | 'custom';
 
 // 关闭原因会传给 onBeforeClose/onClose，也会进入 UI 埋点事件。
 export type HUICloseReason = 'api' | 'bgclose' | 'mask' | 'back' | 'auto' | 'force';

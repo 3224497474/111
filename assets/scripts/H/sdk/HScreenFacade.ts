@@ -129,7 +129,7 @@ export class HScreenFacade {
     private buildInfo(systemInfo?: HSystemInfo): HScreenInfo {
         const visibleSize = view.getVisibleSize();
         const designSize = view.getDesignResolutionSize();
-        const frameSize = (view as any).getFrameSize?.() || visibleSize;
+        const frameSize = (view as any).WindowsSize?.() || visibleSize;
         const platform = systemInfo?.platform || this.platformFacade?.getPlatform() || 'mock';
         const screenWidth = this.normalizePositive(systemInfo?.screenWidth, frameSize.width || visibleSize.width);
         const screenHeight = this.normalizePositive(systemInfo?.screenHeight, frameSize.height || visibleSize.height);

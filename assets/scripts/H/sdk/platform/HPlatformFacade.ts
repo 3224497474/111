@@ -110,6 +110,11 @@ export class HPlatformFacade {
             return 'douyin';
         }
 
+        // 在浏览器（Cocos Creator preview / browser）环境下识别为 web
+        if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+            return 'web';
+        }
+
         return 'mock';
     }
 

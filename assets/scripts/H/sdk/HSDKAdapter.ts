@@ -1,4 +1,5 @@
 import type {
+    HClipboardOptions,
     HFavoriteGuideOptions,
     HResolvedPlatform,
     HRevisitGuideOptions,
@@ -6,6 +7,7 @@ import type {
     HSDKFeature,
     HSDKInitOptions,
     HSDKLoginResult,
+    HSDKSourceFlags,
     HShareMenuOptions,
     HShareOptions,
     HShortcutOptions,
@@ -23,11 +25,15 @@ export interface HMiniGameSDKAdapter {
     init(config: HSDKInitOptions): void;
     hasFeature(feature: HSDKFeature): boolean;
     login(): Promise<HSDKLoginResult>;
+    restartProgram(): HSDKActionResult;
     getLaunchOptions(): unknown;
     getEnterOptions(): unknown;
+    getSourceFlags(): HSDKSourceFlags;
     setShareMenu(options?: HShareMenuOptions): HSDKActionResult;
     hideShareMenu(): HSDKActionResult;
     share(options?: HShareOptions): Promise<HSDKActionResult>;
+    copyText(text: string, options?: HClipboardOptions): Promise<HSDKActionResult>;
+    triggerGC(): HSDKActionResult;
     showFavoriteGuide(options?: HFavoriteGuideOptions): Promise<HSDKActionResult>;
     showRevisitGuide(options?: HRevisitGuideOptions): Promise<HSDKActionResult>;
     checkSidebar(options?: HSidebarOptions): Promise<HSDKActionResult>;

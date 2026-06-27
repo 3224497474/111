@@ -4,6 +4,7 @@ import type { HDataStore } from '../data/HDataStore';
 import type {
     HRewardAdClaimOptions,
     HRewardBaseOptions,
+    HRewardCallbacks,
     HRewardInitOptions,
     HRewardRecord,
     HRewardResult,
@@ -30,6 +31,7 @@ export class HRewardFacade {
         records: {},
         updatedAt: 0,
     };
+    private readonly claimingKeys = new Set<string>();
     private initialized = false;
 
     public init(
@@ -61,45 +63,93 @@ export class HRewardFacade {
 
     public async claimByRewardAd(options: HRewardAdClaimOptions): Promise<HRewardResult> {
         this.ensureInit();
-        const precheck = this.precheck(options);
-        if (precheck) {
-            return precheck;
+        const normalized = this.normalizeOptions(options);
+        const lockKey = this.getClaimingKey(normalized);
+        const busy = this.acquireClaiming(lockKey);
+        if (busy) {
+            return this.reject(normalized, 'failed', '奖励流程正在处理中，请勿重复点击');
         }
 
-        this.analytics?.track('reward_claim_start', {
-            rewardScene: options.rewardScene,
-            rewardId: options.rewardId,
-            placement: options.placement,
-            type: 'rewardAd',
-        });
+        try {
+            const precheck = this.precheck(normalized);
+            if (precheck) {
+                return precheck;
+            }
 
-        const ret = await this.sdkFacade!.showReward(options.placement);
-        if (!ret.rewarded) {
-            return this.reject(options, 'ad-not-rewarded', ret.userMessage || '观看完整广告后才能获得奖励', ret);
+            this.analytics?.track('reward_claim_start', {
+                rewardScene: normalized.rewardScene,
+                rewardId: normalized.rewardId,
+                placement: normalized.placement,
+                type: 'rewardAd',
+            });
+
+            const ret = await this.sdkFacade!.showReward(normalized.placement);
+            if (!ret.rewarded) {
+                return this.reject(normalized, 'ad-not-rewarded', ret.userMessage || '观看完整广告后才能获得奖励', ret);
+            }
+
+            return this.grant(normalized, ret);
+        } catch (error) {
+            return this.reject(normalized, 'failed', this.getErrorMessage(error), error);
+        } finally {
+            this.releaseClaiming(lockKey);
         }
-
-        return this.grant(options, ret);
     }
 
     public async claimBySDKAction(options: HRewardSDKActionClaimOptions): Promise<HRewardResult> {
         this.ensureInit();
-        const precheck = this.precheck(options);
-        if (precheck) {
-            return precheck;
+        const normalized = this.normalizeOptions(options);
+        const lockKey = this.getClaimingKey(normalized);
+        const busy = this.acquireClaiming(lockKey);
+        if (busy) {
+            return this.reject(normalized, 'failed', '奖励流程正在处理中，请勿重复点击');
         }
 
-        this.analytics?.track('reward_claim_start', {
-            rewardScene: options.rewardScene,
-            rewardId: options.rewardId,
-            type: 'sdkAction',
-        });
+        try {
+            const precheck = this.precheck(normalized);
+            if (precheck) {
+                return precheck;
+            }
 
-        const ret = await options.action();
-        if (!ret.rewardable) {
-            return this.reject(options, 'sdk-not-completed', ret.userMessage || '操作完成后才能获得奖励', ret);
+            this.analytics?.track('reward_claim_start', {
+                rewardScene: normalized.rewardScene,
+                rewardId: normalized.rewardId,
+                type: 'sdkAction',
+            });
+
+            const ret = await normalized.action();
+            if (!ret.rewardable) {
+                return this.reject(normalized, 'sdk-not-completed', ret.userMessage || '操作完成后才能获得奖励', ret);
+            }
+
+            return this.grant(normalized, ret);
+        } catch (error) {
+            return this.reject(normalized, 'failed', this.getErrorMessage(error), error);
+        } finally {
+            this.releaseClaiming(lockKey);
         }
+    }
 
-        return this.grant(options, ret);
+    /**
+     * 业务推荐入口：激励广告奖励只暴露 success/fail 两个回调。
+     *
+     * @param options 奖励广告配置，包含 rewardScene、rewardId、placement 等。
+     * @param callbacks 业务只处理成功和失败；频控、状态、埋点、广告回调、奖励记录都在框架内部完成。
+     */
+    public async claimRewardAd(options: HRewardAdClaimOptions, callbacks: HRewardCallbacks = {}): Promise<void> {
+        const result = await this.claimByRewardAdSafe(options);
+        await this.dispatchCallbacks(result, callbacks);
+    }
+
+    /**
+     * 业务推荐入口：分享、收藏、侧边栏、添加桌面等 SDK 行为奖励只暴露 success/fail 两个回调。
+     *
+     * @param options SDK 行为奖励配置，action 由框架 SDK 能力返回 rewardable。
+     * @param callbacks 业务只处理成功和失败；完成判定、冷却和奖励记录都在框架内部完成。
+     */
+    public async claimSDKAction(options: HRewardSDKActionClaimOptions, callbacks: HRewardCallbacks = {}): Promise<void> {
+        const result = await this.claimBySDKActionSafe(options);
+        await this.dispatchCallbacks(result, callbacks);
     }
 
     public hasClaimed(rewardScene: string, rewardId: string): boolean {
@@ -151,6 +201,59 @@ export class HRewardFacade {
         }
 
         return null;
+    }
+
+    private async claimByRewardAdSafe(options: HRewardAdClaimOptions): Promise<HRewardResult> {
+        try {
+            return await this.claimByRewardAd(options);
+        } catch (error) {
+            return this.exceptionResult(options, error);
+        }
+    }
+
+    private async claimBySDKActionSafe(options: HRewardSDKActionClaimOptions): Promise<HRewardResult> {
+        try {
+            return await this.claimBySDKAction(options);
+        } catch (error) {
+            return this.exceptionResult(options, error);
+        }
+    }
+
+    private async dispatchCallbacks(result: HRewardResult, callbacks: HRewardCallbacks): Promise<void> {
+        const payload = {
+            rewardScene: result.rewardScene,
+            rewardId: result.rewardId,
+            reason: result.reason,
+            userMessage: result.userMessage,
+        };
+
+        try {
+            if (result.ok && result.granted) {
+                await callbacks.success?.(payload);
+                return;
+            }
+
+            await callbacks.fail?.(payload);
+        } catch (error) {
+            console.warn('[HReward] reward callback failed', error);
+        }
+    }
+
+    private acquireClaiming(key: string): boolean {
+        if (this.claimingKeys.has(key)) {
+            return true;
+        }
+
+        this.claimingKeys.add(key);
+        return false;
+    }
+
+    private releaseClaiming(key: string): void {
+        this.claimingKeys.delete(key);
+    }
+
+    private getClaimingKey(options: HRewardBaseOptions): string {
+        return options.cooldownKey || `reward-flow:${options.rewardScene}:${options.rewardId}`;
     }
 
     private grant(options: HRewardBaseOptions, raw?: unknown): HRewardResult {
@@ -214,6 +317,34 @@ export class HRewardFacade {
             reason,
         });
 
+        if (this.options.debug) {
+            console.warn('[HReward] rejected', normalized.rewardScene, normalized.rewardId, reason, userMessage);
+        }
+
+        return result;
+    }
+
+    private exceptionResult(options: Partial<HRewardBaseOptions>, error: unknown): HRewardResult {
+        const rewardScene = options.rewardScene?.trim() || 'unknown';
+        const rewardId = options.rewardId?.trim() || 'unknown';
+        const result: HRewardResult = {
+            ok: false,
+            granted: false,
+            duplicated: false,
+            rewardScene,
+            rewardId,
+            reason: 'failed',
+            userMessage: this.getErrorMessage(error),
+            raw: error,
+        };
+
+        this.analytics?.track('reward_exception', {
+            rewardScene,
+            rewardId,
+            reason: result.reason,
+            userMessage: result.userMessage,
+        });
+
         return result;
     }
 
@@ -264,6 +395,16 @@ export class HRewardFacade {
         const month = `${date.getMonth() + 1}`.padStart(2, '0');
         const day = `${date.getDate()}`.padStart(2, '0');
         return `${date.getFullYear()}-${month}-${day}`;
+    }
+
+    private getErrorMessage(error: unknown): string {
+        if (error && typeof error === 'object') {
+            return (error as any).message || '奖励流程失败，请稍后重试';
+        }
+        if (typeof error === 'string') {
+            return error;
+        }
+        return '奖励流程失败，请稍后重试';
     }
 
     private save(immediate: boolean): void {

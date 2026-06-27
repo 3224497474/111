@@ -13,6 +13,8 @@ import type {
 } from './HUITypes';
 import type { HEventBus, HEventId, HEventListener } from '../core/HEventBus';
 import type { HEventNameLike, HEventPayload } from '../core/HEventNames';
+import { HLifecycleScope } from '../core/HLifecycleScope';
+import type { HLifecycleKind } from '../core/HLifecycleScope';
 import type { HStoreFacade } from '../store/HStoreFacade';
 import type { HStoreChange, HStoreSetOptions, HStoreState, HStoreWatchOptions } from '../store/HStoreTypes';
 import type { HUIFacade } from './HUIFacade';
@@ -21,13 +23,6 @@ import { HUIBindingWatcher } from './binding/HUIBindingWatcher';
 import type { HUIBindingConfig } from './binding/HUIBindingTypes';
 
 const { ccclass } = _decorator;
-
-interface HUILifecycleCleanup {
-    id: number;
-    kind: 'event' | 'node-event' | 'timer' | 'custom';
-    scope: HUIAutoClearScope;
-    dispose: () => void;
-}
 
 /**
  * HUIViewBase 是所有业务 UI 的基础类。
@@ -60,13 +55,12 @@ export class HUIViewBase<TParams = any> extends Component {
     private capturedTransform = false;
     private storeRefreshScheduled = false;
     private autoModelWatchConnected = false;
-    private readonly autoModelUnwatchers: Array<() => void> = [];
-    private readonly storeUnwatchers: Array<() => void> = [];
+    private readonly autoModelWatchCleanupIds: number[] = [];
+    private readonly storeWatchCleanupIds: number[] = [];
     private readonly pendingStoreChanges: HStoreChange[] = [];
     private readonly manualDataBindings: HUIBindingConfig[] = [];
     private bindingWatcher: HUIBindingWatcher | null = null;
-    private cleanupSeed = 0;
-    private readonly lifecycleCleanups = new Map<number, HUILifecycleCleanup>();
+    private readonly lifecycle = new HLifecycleScope('HUIViewBase');
     private readonly eventCleanupIds = new Map<HEventId, number>();
 
     // 框架绑定入口，只执行一次：注入上下文、记录初始变换、绑定 bgclose、调用业务 onBind。
@@ -154,6 +148,7 @@ export class HUIViewBase<TParams = any> extends Component {
         this.uiStatus = 'disabling';
         await this.onDisableView();
         this.clearLifecycleCleanups('disable');
+        this.autoModelWatchConnected = false;
     }
 
     // 关闭确认入口，业务可以在 onBeforeClose 里做二次确认或拦截。
@@ -306,7 +301,7 @@ export class HUIViewBase<TParams = any> extends Component {
                 console.warn('[HUIViewBase] timer callback 执行失败', error);
             } finally {
                 if (!repeat) {
-                    this.lifecycleCleanups.delete(cleanupId);
+                    this.lifecycle.remove(cleanupId);
                 }
             }
         };
@@ -355,8 +350,15 @@ export class HUIViewBase<TParams = any> extends Component {
         }
 
         const unwatch = this.store.watch<TState>(moduleName, paths, (change) => this._hStoreChange(change), options);
-        this.storeUnwatchers.push(unwatch);
-        return unwatch;
+        let cleanupId = 0;
+        cleanupId = this.addLifecycleCleanup(() => {
+            this.safeUnwatch(unwatch, 'store unwatch');
+            this.removeCleanupId(this.storeWatchCleanupIds, cleanupId);
+        }, 'disable', 'vm-watch');
+        if (cleanupId) {
+            this.storeWatchCleanupIds.push(cleanupId);
+        }
+        return () => this.runLifecycleCleanup(cleanupId);
     }
 
     protected getModel<TState extends HStoreState = HStoreState>(moduleName: string, defaultValue: TState = {} as TState): TState {
@@ -496,7 +498,8 @@ export class HUIViewBase<TParams = any> extends Component {
         this.clearStoreWatchers();
         this.stopDataBindings();
         this.clearDataBindings();
-        this.clearLifecycleCleanups('remove', true);
+        this.lifecycle.destroy();
+        this.eventCleanupIds.clear();
         this.nextLifeVersion();
         this.uiStatus = 'destroyed';
     }
@@ -504,16 +507,13 @@ export class HUIViewBase<TParams = any> extends Component {
     private addLifecycleCleanup(
         dispose: () => void,
         scope: HUIAutoClearScope,
-        kind: HUILifecycleCleanup['kind'],
+        kind: HLifecycleKind,
     ): number {
-        const id = ++this.cleanupSeed;
-        this.lifecycleCleanups.set(id, {
-            id,
+        return this.lifecycle.add(dispose, {
             kind,
             scope,
-            dispose,
+            label: this.uiId || this.node.name,
         });
-        return id;
     }
 
     private bindEventCleanup(eventId: HEventId, scope: HUIAutoClearScope): void {
@@ -525,29 +525,32 @@ export class HUIViewBase<TParams = any> extends Component {
             this.eventBus?.off(eventId);
             this.eventCleanupIds.delete(eventId);
         }, scope, 'event');
-        this.eventCleanupIds.set(eventId, cleanupId);
+        if (cleanupId) {
+            this.eventCleanupIds.set(eventId, cleanupId);
+        }
     }
 
     private runLifecycleCleanup(id: number): void {
-        const cleanup = this.lifecycleCleanups.get(id);
-        if (!cleanup) {
-            return;
-        }
+        this.lifecycle.remove(id);
+    }
 
-        this.lifecycleCleanups.delete(id);
+    private clearLifecycleCleanups(scope?: HUIAutoClearScope, includeAll = false, kind?: HLifecycleKind): void {
+        this.lifecycle.clear(scope, includeAll, kind);
+    }
+
+    private safeUnwatch(unwatch: (() => void) | undefined, label: string): void {
         try {
-            cleanup.dispose();
+            unwatch?.();
         } catch (error) {
-            console.warn('[HUIViewBase] lifecycle cleanup 执行失败', error);
+            console.warn(`[HUIViewBase] ${label} 执行失败`, error);
         }
     }
 
-    private clearLifecycleCleanups(scope?: HUIAutoClearScope, includeAll = false, kind?: HUILifecycleCleanup['kind']): void {
-        const ids = [...this.lifecycleCleanups.values()]
-            .filter((cleanup) => !scope || includeAll || cleanup.scope === scope)
-            .filter((cleanup) => !kind || cleanup.kind === kind)
-            .map((cleanup) => cleanup.id);
-        ids.forEach((id) => this.runLifecycleCleanup(id));
+    private removeCleanupId(list: number[], cleanupId: number): void {
+        const index = list.indexOf(cleanupId);
+        if (index >= 0) {
+            list.splice(index, 1);
+        }
     }
 
     private connectAutoModelWatches(): void {
@@ -571,20 +574,25 @@ export class HUIViewBase<TParams = any> extends Component {
                     once: watch.once,
                 },
             );
-            this.autoModelUnwatchers.push(unwatch);
+            let cleanupId = 0;
+            cleanupId = this.addLifecycleCleanup(() => {
+                this.safeUnwatch(unwatch, 'auto model unwatch');
+                this.removeCleanupId(this.autoModelWatchCleanupIds, cleanupId);
+                if (this.autoModelWatchCleanupIds.length <= 0) {
+                    this.autoModelWatchConnected = false;
+                }
+            }, 'disable', 'vm-watch');
+            if (cleanupId) {
+                this.autoModelWatchCleanupIds.push(cleanupId);
+            }
         });
 
         this.autoModelWatchConnected = true;
     }
 
     private disconnectAutoModelWatches(): void {
-        while (this.autoModelUnwatchers.length > 0) {
-            const unwatch = this.autoModelUnwatchers.pop();
-            try {
-                unwatch?.();
-            } catch (error) {
-                console.warn('[HUIViewBase] auto model unwatch 执行失败', error);
-            }
+        while (this.autoModelWatchCleanupIds.length > 0) {
+            this.runLifecycleCleanup(this.autoModelWatchCleanupIds.pop()!);
         }
         this.autoModelWatchConnected = false;
     }
@@ -643,13 +651,8 @@ export class HUIViewBase<TParams = any> extends Component {
 
     private clearStoreWatchers(): void {
         this.disconnectAutoModelWatches();
-        while (this.storeUnwatchers.length > 0) {
-            const unwatch = this.storeUnwatchers.pop();
-            try {
-                unwatch?.();
-            } catch (error) {
-                console.warn('[HUIViewBase] store unwatch 执行失败', error);
-            }
+        while (this.storeWatchCleanupIds.length > 0) {
+            this.runLifecycleCleanup(this.storeWatchCleanupIds.pop()!);
         }
         this.pendingStoreChanges.length = 0;
         this.storeRefreshScheduled = false;
@@ -761,7 +764,7 @@ export class HUIViewBase<TParams = any> extends Component {
         }
     }
 
-    // 打开动画统一从配置解析，默认弹窗 fade-scale，页面/loading/tip/guide fade。
+    // 打开动画统一从配置解析，默认弹窗/奖励 fade-scale，页面/loading/tip/guide/error fade。
     private async playOpenAnimation(): Promise<void> {
         const target = this.getAnimationTargetNode();
         const config = this.resolveAnimationConfig();
@@ -830,11 +833,13 @@ export class HUIViewBase<TParams = any> extends Component {
     private getDefaultAnimationType(): HUIAnimationType {
         switch (this.config?.type) {
             case 'dialog':
+            case 'reward':
                 return 'fade-scale';
             case 'page':
             case 'tip':
             case 'loading':
             case 'guide':
+            case 'error':
                 return 'fade';
             default:
                 return 'none';
@@ -844,6 +849,7 @@ export class HUIViewBase<TParams = any> extends Component {
     private getDefaultAnimationDuration(): number {
         switch (this.config?.type) {
             case 'dialog':
+            case 'reward':
                 return 0.18;
             case 'page':
                 return 0.14;

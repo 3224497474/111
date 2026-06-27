@@ -334,12 +334,16 @@ export class HResourceFacade {
                 });
             } else {
                 const task = this.backgroundQueue.shift()!;
-                this.preloadOne({
-                    ...task,
-                    preloadOnly: true,
-                }).catch((error) => {
+                const runner = task.preloadOnly === false
+                    ? this.loadAsset(task).then(() => undefined)
+                    : this.preloadOne({
+                        ...task,
+                        preloadOnly: true,
+                    });
+
+                runner.catch((error) => {
                     if (this.debug) {
-                        console.warn('[HResourceFacade] background preload failed:', task.path, error);
+                        console.warn('[HResourceFacade] background resource failed:', task.path, error);
                     }
                 }).then(() => {
                     this.backgroundActiveCount -= 1;

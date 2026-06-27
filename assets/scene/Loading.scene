@@ -23,7 +23,7 @@
     "_active": true,
     "_components": [],
     "_prefab": {
-      "__id__": 35
+      "__id__": 37
     },
     "_lpos": {
       "__type__": "cc.Vec3",
@@ -54,7 +54,7 @@
     },
     "autoReleaseAssets": false,
     "_globals": {
-      "__id__": 36
+      "__id__": 38
     },
     "_id": "fec68dbf-4ec1-429f-9a6c-e3bfc48f49de"
   },
@@ -77,22 +77,22 @@
         "__id__": 7
       },
       {
-        "__id__": 28
+        "__id__": 31
       }
     ],
     "_active": true,
     "_components": [
       {
-        "__id__": 30
-      },
-      {
-        "__id__": 31
-      },
-      {
-        "__id__": 32
-      },
-      {
         "__id__": 33
+      },
+      {
+        "__id__": 34
+      },
+      {
+        "__id__": 35
+      },
+      {
+        "__id__": 36
       }
     ],
     "_prefab": null,
@@ -127,7 +127,7 @@
   },
   {
     "__type__": "cc.Node",
-    "_name": "gui",
+    "_name": "game",
     "_objFlags": 0,
     "__editorExtras__": {},
     "_parent": {
@@ -168,7 +168,7 @@
       "y": 0,
       "z": 0
     },
-    "_id": "e0d/SdROdHT59EhJAFEbXE"
+    "_id": "11oo53nqdDRZVUnNxLPUqQ"
   },
   {
     "__type__": "cc.UITransform",
@@ -190,11 +190,11 @@
       "x": 0.5,
       "y": 0.5
     },
-    "_id": "00SkPNdMhDbq6T4Ey1/zcq"
+    "_id": "4aBSwYUGBJx6dZWV971BJK"
   },
   {
     "__type__": "cc.Node",
-    "_name": "game",
+    "_name": "gui",
     "_objFlags": 0,
     "__editorExtras__": {},
     "_parent": {
@@ -235,7 +235,7 @@
       "y": 0,
       "z": 0
     },
-    "_id": "11oo53nqdDRZVUnNxLPUqQ"
+    "_id": "e0d/SdROdHT59EhJAFEbXE"
   },
   {
     "__type__": "cc.UITransform",
@@ -257,7 +257,7 @@
       "x": 0.5,
       "y": 0.5
     },
-    "_id": "4aBSwYUGBJx6dZWV971BJK"
+    "_id": "00SkPNdMhDbq6T4Ey1/zcq"
   },
   {
     "__type__": "cc.Node",
@@ -288,6 +288,9 @@
       },
       {
         "__id__": 27
+      },
+      {
+        "__id__": 28
       }
     ],
     "_prefab": null,
@@ -522,8 +525,8 @@
     "__prefab": null,
     "_contentSize": {
       "__type__": "cc.Size",
-      "width": 263.5546875,
-      "height": 75.6
+      "width": 350.4,
+      "height": 60
     },
     "_anchorPoint": {
       "__type__": "cc.Vec2",
@@ -561,8 +564,11 @@
     "_lineHeight": 60,
     "_overflow": 0,
     "_enableWrapText": true,
-    "_font": null,
-    "_isSystemFontUsed": true,
+    "_font": {
+      "__uuid__": "ce8f2ad5-a316-4653-ba49-398b4f04557f",
+      "__expectedType__": "cc.BitmapFont"
+    },
+    "_isSystemFontUsed": false,
     "_spacingX": 0,
     "_isItalic": false,
     "_isBold": false,
@@ -1056,6 +1062,64 @@
     "_id": "4e+AjPIYlBvpUZcr45/Yst"
   },
   {
+    "__type__": "1817cieiSBGR75k4gHfbjRt",
+    "_name": "",
+    "_objFlags": 0,
+    "__editorExtras__": {},
+    "node": {
+      "__id__": 7
+    },
+    "_enabled": true,
+    "__prefab": null,
+    "minShowSeconds": 0.5,
+    "progressFollowSpeed": 2,
+    "debugLog": true,
+    "progressBar": {
+      "__id__": 21
+    },
+    "percentLabel": {
+      "__id__": 14
+    },
+    "tipLabel": {
+      "__id__": 24
+    },
+    "detailLabel": {
+      "__id__": 24
+    },
+    "errorLabel": {
+      "__id__": 24
+    },
+    "firstScreenBundles": [
+      {
+        "__id__": 29
+      }
+    ],
+    "firstScreenResources": [],
+    "startupUIs": [
+      {
+        "__id__": 30
+      }
+    ],
+    "_id": "27qsY5ZDpFQrAp3a2MeQHr"
+  },
+  {
+    "__type__": "HLoadingBundleItem",
+    "enabled": true,
+    "name": "home",
+    "note": "gui"
+  },
+  {
+    "__type__": "HLoadingStartupUIItem",
+    "enabled": true,
+    "uiId": "home",
+    "openType": 1,
+    "order": 999,
+    "layer": 1,
+    "layerName": "",
+    "paramsJson": "",
+    "note": ""
+  },
+  {
     "__type__": "cc.Node",
     "_name": "UICamera_Canvas",
     "_objFlags": 0,
@@ -1067,7 +1131,7 @@
     "_active": true,
     "_components": [
       {
-        "__id__": 29
+        "__id__": 32
       }
     ],
     "_prefab": null,
@@ -1106,7 +1170,7 @@
     "_objFlags": 0,
     "__editorExtras__": {},
     "node": {
-      "__id__": 28
+      "__id__": 31
     },
     "_enabled": true,
     "__prefab": null,
@@ -1179,7 +1243,7 @@
     "_enabled": true,
     "__prefab": null,
     "_cameraComponent": {
-      "__id__": 29
+      "__id__": 32
     },
     "_alignCanvasWithScreen": true,
     "_id": "ccPWMsAntOQotZPWs47EjH"
@@ -1215,7 +1279,7 @@
     "_id": "72v8l9UmtFaoTjwzRWu7kl"
   },
   {
-    "__type__": "44b1dF34tpNboT5vxUks5Qq",
+    "__type__": "9909fE0JrJPb6ofWdY8+Z79",
     "_name": "",
     "_objFlags": 0,
     "__editorExtras__": {},
@@ -1224,52 +1288,35 @@
     },
     "_enabled": true,
     "__prefab": null,
-    "homeSceneName": "home",
-    "preloadHomeScene": true,
-    "minShowSeconds": 0.8,
-    "progressFollowSpeed": 3.8,
-    "backgroundConcurrency": 1,
-    "autoStart": true,
+    "gameRoot": {
+      "__id__": 3
+    },
+    "guiRoot": {
+      "__id__": 5
+    },
+    "loadingRoot": {
+      "__id__": 7
+    },
+    "loading": {
+      "__id__": 28
+    },
+    "musicAudioSource": null,
+    "autoFindRoots": true,
+    "gameRootName": "game",
+    "guiRootName": "guii",
+    "loadingRootName": "Loading",
+    "hideGameUntilReady": false,
+    "destroyLoadingWhenDone": true,
+    "autoOpenStartupUIs": true,
+    "startBackgroundLoadingAfterEnter": true,
     "dataNamespace": "H",
     "redDotStorageModuleName": "redDot",
     "sdkSessionStorageModuleName": "platformSession",
-    "autoSDKLogin": true,
-    "autoLoadRedDotLocal": true,
-    "persistRedDotByDefault": false,
-    "keepVisibleDuringSceneSwitch": true,
-    "keepVisibleAfterHomeFrames": 2,
-    "progressBar": {
-      "__id__": 21
-    },
-    "percentLabel": {
-      "__id__": 14
-    },
-    "tipLabel": {
-      "__id__": 24
-    },
-    "detailLabel": {
-      "__id__": 24
-    },
-    "errorLabel": {
-      "__id__": 24
-    },
-    "firstScreenBundles": [
-      {
-        "__id__": 34
-      }
-    ],
-    "firstScreenResources": [],
-    "firstScreenPrefabs": [],
-    "warmupBundlesBeforeHome": [],
-    "backgroundBundles": [],
-    "backgroundResources": [],
-    "_id": "9acjbSbipEH6SRMFuqq8iu"
-  },
-  {
-    "__type__": "HLoadingBundleItem",
-    "enabled": true,
-    "name": "home",
-    "note": ""
+    "backgroundConcurrency": 1,
+    "resourceDebug": true,
+    "designWidth": 720,
+    "designHeight": 1280,
+    "_id": "ba4NzWpSRHXZo1Rztw+zbw"
   },
   {
     "__type__": "cc.PrefabInfo",
@@ -1282,28 +1329,28 @@
   {
     "__type__": "cc.SceneGlobals",
     "ambient": {
-      "__id__": 37
-    },
-    "shadows": {
-      "__id__": 38
-    },
-    "_skybox": {
       "__id__": 39
     },
-    "fog": {
+    "shadows": {
       "__id__": 40
     },
-    "octree": {
+    "_skybox": {
       "__id__": 41
     },
-    "skin": {
+    "fog": {
       "__id__": 42
     },
-    "lightProbeInfo": {
+    "octree": {
       "__id__": 43
     },
-    "postSettings": {
+    "skin": {
       "__id__": 44
+    },
+    "lightProbeInfo": {
+      "__id__": 45
+    },
+    "postSettings": {
+      "__id__": 46
     },
     "bakedWithStationaryMainLight": false,
     "bakedWithHighpLightmap": false

@@ -8,6 +8,7 @@ export type HStoreChangeReason =
     | 'set'
     | 'patch'
     | 'set-value'
+    | 'list-presenter'
     | 'mark-dirty'
     | 'reset'
     | 'remove';

@@ -127,11 +127,14 @@ export class HUIFacade {
     private readonly defaultLayerOrder: Record<UILayer, number> = {
         [UILayer.Layer1]: 100,
         [UILayer.Layer2]: 200,
-        [UILayer.Layer3]: 300,
+        [UILayer.Dialog]: 300,
+        [UILayer.Layer3]: 310,
         [UILayer.Layer4]: 400,
         [UILayer.Layer5]: 500,
+        [UILayer.Reward]: 550,
         [UILayer.Guide]: 600,
         [UILayer.Tip]: 700,
+        [UILayer.Error]: 750,
         [UILayer.Transition]: 800,
     };
 
@@ -303,8 +306,41 @@ export class HUIFacade {
         return this.open({ ...options, id, type: 'page', layer: UILayer.Layer2, params });
     }
 
+    /**
+     * 打开一级 UI。
+     *
+     * @param id UI 路由 id，推荐项目侧使用枚举传入。
+     * @param params 打开 UI 时传入的业务参数，最终会进入 bind/open/refresh 生命周期。
+     * @param options 临时覆盖的打开配置，例如 animation、cacheMode、blockInput。
+     */
+    public openLayer1(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
+        return this.open({ ...options, id, type: 'page', layer: UILayer.Layer1, params });
+    }
+
+    /**
+     * 打开二级 UI。
+     *
+     * @param id UI 路由 id，推荐项目侧使用枚举传入。
+     * @param params 打开 UI 时传入的业务参数，最终会进入 bind/open/refresh 生命周期。
+     * @param options 临时覆盖的打开配置，例如 animation、cacheMode、blockInput。
+     */
+    public openLayer2(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
+        return this.open({ ...options, id, type: 'page', layer: UILayer.Layer2, params });
+    }
+
     public openDialog(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
-        return this.open({ ...options, id, type: 'dialog', layer: UILayer.Layer3, params });
+        return this.open({ ...options, id, type: 'dialog', layer: UILayer.Dialog, params });
+    }
+
+    /**
+     * 打开奖励物品表现层。
+     *
+     * @param id UI 路由 id，通常是奖励 item、飞行动画或奖励面板路由。
+     * @param params 奖励展示参数，例如道具列表、起点、终点、播放速度。
+     * @param options 临时覆盖的打开配置；默认非单例，避免多个奖励表现互相覆盖。
+     */
+    public openReward(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
+        return this.open({ singleton: false, ...options, id, type: 'reward', layer: UILayer.Reward, params });
     }
 
     public openGuide(id: HUIRouteId, params?: any, options: Partial<HUIOpenOptions> = {}): Promise<Node> {
@@ -338,6 +374,25 @@ export class HUIFacade {
         }
 
         return this.showBuiltinTip(id, paramsOrDuration);
+    }
+
+    /**
+     * 显示错误信息。
+     *
+     * @param messageOrId 已注册路由 id 或直接显示的错误文案。
+     * @param paramsOrDuration 路由参数或内置错误提示持续时间，单位毫秒。
+     */
+    public async showError(messageOrId: HUIRouteId, paramsOrDuration?: any): Promise<Node> {
+        const id = String(messageOrId);
+        const hasRoute = this.configs.has(id);
+        if (hasRoute || (paramsOrDuration && typeof paramsOrDuration === 'object')) {
+            const params = paramsOrDuration && typeof paramsOrDuration === 'object'
+                ? paramsOrDuration
+                : { message: id, durationMs: paramsOrDuration };
+            return this.open({ id: messageOrId, type: 'error', layer: UILayer.Error, singleton: false, params });
+        }
+
+        return this.showBuiltinError(id, paramsOrDuration);
     }
 
     public async refresh(id: HUIRouteId, params?: any): Promise<void> {
@@ -424,22 +479,38 @@ export class HUIFacade {
 
     // 首次打开 UI 的完整链路：加载/实例化 -> 创建 record -> 挂层级 -> bind -> open。
     private async loadCreateAndOpen(config: HUIConfig, options: HUIOpenOptions): Promise<Node> {
+        const totalStartedAt = Date.now();
+        const loadStartedAt = Date.now();
         const loaded = options.node
             ? { node: options.node } as HUILoadedNode
             : await this.loadPrefabNode(config);
+        this.logOpenCost(config.id, 'load prefab + instantiate', loadStartedAt);
+
+        const recordStartedAt = Date.now();
         const node = loaded.node;
         const record = this.createRecord(config, node, options.params);
         record.prefabAsset = loaded.prefabAsset;
         record.bundleName = loaded.bundleName;
         record.bundle = loaded.bundle;
         this.retainRecordResource(record);
+        this.logOpenCost(config.id, 'create record', recordStartedAt);
+
         try {
+            const attachStartedAt = Date.now();
             this.records.set(record.id, record);
             this.attachToLayer(record, options.parent, config.order);
             this.createMaskForRecord(record);
             this.applyInputPolicy(record);
+            this.logOpenCost(config.id, 'attach layer', attachStartedAt);
+
+            const bindStartedAt = Date.now();
             await this.bindRecord(record, options.params);
+            this.logOpenCost(config.id, 'bind', bindStartedAt);
+
+            const openStartedAt = Date.now();
             await this.openRecord(record, options.params);
+            this.logOpenCost(config.id, 'open lifecycle', openStartedAt);
+            this.logOpenCost(config.id, 'open total', totalStartedAt, 0);
             return node;
         } catch (error) {
             this.records.delete(record.id);
@@ -643,12 +714,12 @@ export class HUIFacade {
 
     private scheduleAutoRemove(id: string, params?: any): void {
         const record = this.records.get(id);
-        if (!record || record.type !== 'tip') {
+        if (!record || record.config.autoRemoveMs === undefined) {
             return;
         }
 
-        const durationMs = Number(params?.durationMs ?? params?.duration ?? record.config.autoRemoveMs ?? 1500);
-        if (durationMs <= 0) {
+        const durationMs = Number(params?.durationMs ?? params?.duration ?? record.config.autoRemoveMs);
+        if (!Number.isFinite(durationMs) || durationMs <= 0) {
             return;
         }
 
@@ -724,7 +795,13 @@ export class HUIFacade {
     }
 
     private resolveOpenLoadingPolicy(config: HUIConfig): HUIOpenLoadingPolicy | null {
-        if (config.type === 'loading' || config.type === 'tip' || (config as HUIOpenOptions).silent) {
+        if (
+            config.type === 'loading'
+            || config.type === 'tip'
+            || config.type === 'reward'
+            || config.type === 'error'
+            || (config as HUIOpenOptions).silent
+        ) {
             return null;
         }
 
@@ -820,6 +897,36 @@ export class HUIFacade {
         });
     }
 
+    // 没有注册错误提示预制体时使用内置错误层，保证框架始终能显示关键错误信息。
+    private async showBuiltinError(message: string, durationMs = 2200): Promise<Node> {
+        this.ensureInit();
+        const id = `h:error:${++this.tipSeed}`;
+        const node = new Node(id);
+        const transform = node.addComponent(UITransform);
+        transform.setContentSize(620, 86);
+
+        const label = node.addComponent(Label);
+        label.string = message;
+        label.fontSize = 28;
+        label.lineHeight = 34;
+        label.color = new Color(255, 92, 92, 255);
+
+        return this.open({
+            id,
+            type: 'error',
+            layer: UILayer.Error,
+            node,
+            singleton: false,
+            cacheMode: 'destroy',
+            animation: 'slide-down',
+            autoRemoveMs: durationMs,
+            params: {
+                message,
+                durationMs,
+            },
+        });
+    }
+
     // 没有注册 loading 预制体时使用内置 Loading，保证框架永远能给用户一个加载反馈。
     private showBuiltinLoading(id: string, params?: any): Promise<Node> {
         const message = String(params?.message || '加载中');
@@ -893,6 +1000,13 @@ export class HUIFacade {
 
     private createRuntimeId(id: string): string {
         return `${id}#${Date.now()}#${++this.tipSeed}`;
+    }
+
+    private logOpenCost(id: HUIRouteId, step: string, startedAt: number, thresholdMs = 16): void {
+        const cost = Date.now() - startedAt;
+        if (cost >= thresholdMs) {
+            console.log(`[HUIFacade] ${String(id)} ${step} 耗时 ${cost} ms`);
+        }
     }
 
     private attachToLayer(record: HUIRecord, parent?: Node, order?: number): void {
@@ -1084,12 +1198,16 @@ export class HUIFacade {
 
     private resolveDefaultPriority(record: HUIRecord): number {
         switch (record.type) {
+            case 'error':
+                return 90;
             case 'guide':
                 return 60;
             case 'loading':
                 return 70;
             case 'tip':
                 return 80;
+            case 'reward':
+                return 55;
             case 'dialog':
                 return record.layer === UILayer.Layer5 ? 50 : 30;
             case 'page':
@@ -1137,7 +1255,7 @@ export class HUIFacade {
         }
     }
 
-    // 初始化时创建所有标准 UI 层，后续 layer1-layer5/tip/guide/transition 都复用这些节点。
+    // 初始化时创建所有标准 UI 层，后续 layer1/layer2/dialog/reward/tip/guide/error/transition 都复用这些节点。
     private createDefaultLayers(customOrder?: HUIInitOptions['layerOrder']): void {
         const entries = (Object.values(UILayer) as UILayer[])
             .map((layer) => ({
@@ -1313,16 +1431,27 @@ export class HUIFacade {
             return Promise.reject(new Error(`[HUIFacade] ${String(config.id)} 缺少 prefabPath 或 node`));
         }
 
+        const id = String(config.id);
         const bundleName = config.bundle;
         if (!bundleName || bundleName === 'resources') {
+            const cachedPrefab = resources.get(prefabPath, Prefab);
+            if (cachedPrefab?.isValid) {
+                return Promise.resolve(this.instantiateCachedPrefab(id, prefabPath, cachedPrefab, 'resources'));
+            }
+
             return new Promise((resolve, reject) => {
+                const loadStartedAt = Date.now();
                 resources.load(prefabPath, Prefab, (err, prefab) => {
+                    this.logOpenCost(id, `resources.load ${prefabPath}`, loadStartedAt);
                     if (err || !prefab) {
                         reject(err || new Error(`[HUIFacade] 预制体加载失败：resources/${prefabPath}`));
                         return;
                     }
+                    const instantiateStartedAt = Date.now();
+                    const node = instantiate(prefab);
+                    this.logOpenCost(id, `instantiate ${prefabPath}`, instantiateStartedAt);
                     resolve({
-                        node: instantiate(prefab),
+                        node,
                         prefabAsset: prefab,
                         bundleName: 'resources',
                     });
@@ -1330,20 +1459,54 @@ export class HUIFacade {
             });
         }
 
-        return this.loadBundle(bundleName).then((bundle) => new Promise<HUILoadedNode>((resolve, reject) => {
-            bundle.load(prefabPath, Prefab, (err, prefab) => {
-                if (err || !prefab) {
-                    reject(err || new Error(`[HUIFacade] 预制体加载失败：${bundleName}/${prefabPath}`));
-                    return;
-                }
-                resolve({
-                    node: instantiate(prefab),
-                    prefabAsset: prefab,
-                    bundleName,
-                    bundle,
+        const bundleStartedAt = Date.now();
+        return this.loadBundle(bundleName).then((bundle) => {
+            this.logOpenCost(id, `loadBundle ${bundleName}`, bundleStartedAt);
+
+            const cachedPrefab = bundle.get(prefabPath, Prefab);
+            if (cachedPrefab?.isValid) {
+                return this.instantiateCachedPrefab(id, `${bundleName}/${prefabPath}`, cachedPrefab, bundleName, bundle);
+            }
+
+            return new Promise<HUILoadedNode>((resolve, reject) => {
+                const loadStartedAt = Date.now();
+                bundle.load(prefabPath, Prefab, (err, prefab) => {
+                    this.logOpenCost(id, `bundle.load ${bundleName}/${prefabPath}`, loadStartedAt);
+                    if (err || !prefab) {
+                        reject(err || new Error(`[HUIFacade] 预制体加载失败：${bundleName}/${prefabPath}`));
+                        return;
+                    }
+
+                    const instantiateStartedAt = Date.now();
+                    const node = instantiate(prefab);
+                    this.logOpenCost(id, `instantiate ${bundleName}/${prefabPath}`, instantiateStartedAt);
+                    resolve({
+                        node,
+                        prefabAsset: prefab,
+                        bundleName,
+                        bundle,
+                    });
                 });
             });
-        }));
+        });
+    }
+
+    private instantiateCachedPrefab(
+        id: string,
+        logPath: string,
+        prefab: Prefab,
+        bundleName: string,
+        bundle?: AssetManager.Bundle,
+    ): HUILoadedNode {
+        const instantiateStartedAt = Date.now();
+        const node = instantiate(prefab);
+        this.logOpenCost(id, `instantiate cached ${logPath}`, instantiateStartedAt);
+        return {
+            node,
+            prefabAsset: prefab,
+            bundleName,
+            bundle,
+        };
     }
 
     private loadBundle(bundleName: string): Promise<AssetManager.Bundle> {
@@ -1407,7 +1570,7 @@ export class HUIFacade {
             layer,
             cacheMode,
             group,
-            singleton: config.singleton ?? type !== 'tip',
+            singleton: config.singleton ?? (type !== 'tip' && type !== 'reward' && type !== 'error'),
             exclusive: config.exclusive ?? type === 'page',
             blockInput: config.blockInput ?? (type === 'dialog' || type === 'guide' || type === 'loading'),
             showMask: config.showMask ?? (type === 'dialog' || type === 'guide' || type === 'loading'),
@@ -1425,15 +1588,19 @@ export class HUIFacade {
             case 'page':
                 return UILayer.Layer2;
             case 'dialog':
-                return UILayer.Layer3;
+                return UILayer.Dialog;
+            case 'reward':
+                return UILayer.Reward;
             case 'tip':
                 return UILayer.Tip;
             case 'guide':
                 return UILayer.Guide;
+            case 'error':
+                return UILayer.Error;
             case 'loading':
                 return UILayer.Transition;
             default:
-                return UILayer.Layer3;
+                return UILayer.Dialog;
         }
     }
 
@@ -1442,10 +1609,19 @@ export class HUIFacade {
             case UILayer.Layer1:
             case UILayer.Layer2:
                 return 'page';
+            case UILayer.Dialog:
+            case UILayer.Layer3:
+            case UILayer.Layer4:
+            case UILayer.Layer5:
+                return 'dialog';
+            case UILayer.Reward:
+                return 'reward';
             case UILayer.Tip:
                 return 'tip';
             case UILayer.Guide:
                 return 'guide';
+            case UILayer.Error:
+                return 'error';
             case UILayer.Transition:
                 return 'loading';
             default:
@@ -1461,6 +1637,8 @@ export class HUIFacade {
                 return 'keep';
             case 'tip':
             case 'dialog':
+            case 'reward':
+            case 'error':
             default:
                 return 'destroy';
         }
@@ -1500,9 +1678,18 @@ export class HUIFacade {
     }
 
     // UI 事件统一从这里发出，便于埋点、性能统计和线上排查打开失败/关闭失败。
-    private emitUIEvent(eventName: HUIEventType, target: HUIRecord | HUIConfig, reasonOrError?: unknown, durationMs?: number): void {
+    private emitUIEvent(eventName: HUIEventType, target: HUIRecord | HUIConfig | null | undefined, reasonOrError?: unknown, durationMs?: number): void {
+        if (!target) {
+            return;
+        }
+
         const record = this.isRecord(target) ? target : null;
         const config = record ? record.config : target;
+        if (!config || config.id === undefined || config.id === null) {
+            console.warn('[HUIFacade] UI 事件目标缺少 id', eventName, target);
+            return;
+        }
+
         const event: HUIEvent = {
             name: eventName,
             id: String(config.id),
@@ -1537,8 +1724,9 @@ export class HUIFacade {
         });
     }
 
-    private isRecord(target: HUIRecord | HUIConfig): target is HUIRecord {
-        return (target as HUIRecord).node !== undefined;
+    private isRecord(target: HUIRecord | HUIConfig | null | undefined): target is HUIRecord {
+        const maybeRecord = target as Partial<HUIRecord> | null | undefined;
+        return !!maybeRecord && maybeRecord.node !== undefined && maybeRecord.config !== undefined;
     }
 
     private ensureInit(): void {

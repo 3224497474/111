@@ -37,14 +37,19 @@
             "configMode": "overwrite",
             "overwriteSettings": {
               "wechatgame": {
-                "isRemote": false
+                "isRemote": true,
+                "compressionType": "merge_all_json"
+              },
+              "bytedance-mini-game": {
+                "isRemote": true,
+                "compressionType": "merge_all_json"
               }
             }
           }
         }
       },
       "24zWoQLpdPZKmznEOcZ5yD": {
-        "displayName": "animation",
+        "displayName": "setting",
         "configs": {
           "native": {
             "preferredOptions": {
@@ -130,7 +135,7 @@
         }
       },
       "96Bq0/gb9AbJnpqNCCt7cS": {
-        "displayName": "model",
+        "displayName": "xx",
         "configs": {
           "native": {
             "preferredOptions": {
@@ -172,140 +177,8 @@
           }
         }
       },
-      "91UP0encdGN6lTFHigzs33": {
-        "displayName": "prefabs",
-        "configs": {
-          "native": {
-            "preferredOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "overwriteSettings": {
-              "android": {
-                "isRemote": false,
-                "compressionType": "merge_all_json"
-              }
-            }
-          },
-          "web": {
-            "preferredOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "fallbackOptions": {
-              "compressionType": "merge_dep"
-            }
-          },
-          "miniGame": {
-            "fallbackOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "configMode": "overwrite",
-            "overwriteSettings": {
-              "wechatgame": {
-                "isRemote": true,
-                "compressionType": "merge_all_json"
-              },
-              "bytedance-mini-game": {
-                "compressionType": "merge_all_json",
-                "isRemote": true
-              }
-            }
-          }
-        }
-      },
-      "9cGFtAUkdOrZp/qRDjvYUa": {
-        "displayName": "textures",
-        "configs": {
-          "native": {
-            "preferredOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "overwriteSettings": {
-              "android": {
-                "isRemote": false,
-                "compressionType": "merge_all_json"
-              }
-            }
-          },
-          "web": {
-            "preferredOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "fallbackOptions": {
-              "compressionType": "merge_dep"
-            }
-          },
-          "miniGame": {
-            "fallbackOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "configMode": "overwrite",
-            "overwriteSettings": {
-              "wechatgame": {
-                "isRemote": true,
-                "compressionType": "merge_all_json"
-              },
-              "vivo-mini-game": {
-                "isRemote": false
-              },
-              "bytedance-mini-game": {
-                "compressionType": "merge_all_json",
-                "isRemote": true
-              }
-            }
-          }
-        }
-      },
-      "3bMB1eMiVGxYnRfz42k0PH": {
-        "displayName": "firstUI",
-        "configs": {
-          "native": {
-            "preferredOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "overwriteSettings": {
-              "android": {
-                "isRemote": false,
-                "compressionType": "merge_all_json"
-              }
-            }
-          },
-          "web": {
-            "preferredOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "fallbackOptions": {
-              "compressionType": "merge_dep"
-            }
-          },
-          "miniGame": {
-            "fallbackOptions": {
-              "isRemote": false,
-              "compressionType": "merge_dep"
-            },
-            "configMode": "overwrite",
-            "overwriteSettings": {
-              "wechatgame": {
-                "compressionType": "merge_all_json",
-                "isRemote": true
-              },
-              "bytedance-mini-game": {
-                "compressionType": "merge_all_json",
-                "isRemote": true
-              }
-            }
-          }
-        }
-      },
-      "ec5GKWOjlLHKzXVH7dDQr3": {
-        "displayName": "Battle",
+      "83Kuj4KytJjbG1spfAmK2p": {
+        "displayName": "Attributers",
         "configs": {
           "native": {
             "preferredOptions": {
@@ -327,13 +200,50 @@
               "isRemote": false,
               "compressionType": "merge_dep"
             },
-            "configMode": "fallback",
+            "configMode": "overwrite",
             "overwriteSettings": {
-              "wechatgame": {
+              "bytedance-mini-game": {
                 "isRemote": true,
                 "compressionType": "merge_all_json"
               },
+              "wechatgame": {
+                "isRemote": true,
+                "compressionType": "merge_all_json"
+              }
+            }
+          }
+        }
+      },
+      "13/bQD6AFFx5/eV1pBO1dJ": {
+        "displayName": "setting",
+        "configs": {
+          "native": {
+            "preferredOptions": {
+              "isRemote": true,
+              "compressionType": "merge_dep"
+            }
+          },
+          "web": {
+            "preferredOptions": {
+              "isRemote": false,
+              "compressionType": "merge_dep"
+            },
+            "fallbackOptions": {
+              "compressionType": "merge_dep"
+            }
+          },
+          "miniGame": {
+            "fallbackOptions": {
+              "isRemote": false,
+              "compressionType": "merge_dep"
+            },
+            "configMode": "fallback",
+            "overwriteSettings": {
               "bytedance-mini-game": {
+                "isRemote": true,
+                "compressionType": "merge_all_json"
+              },
+              "wechatgame": {
                 "isRemote": true,
                 "compressionType": "merge_all_json"
               }

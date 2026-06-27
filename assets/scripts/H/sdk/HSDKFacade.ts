@@ -8,9 +8,11 @@ import type {
     HAdRewardResult,
     HAdShowResult,
     HAdStats,
+    HClipboardOptions,
     HFavoriteGuideOptions,
     HResolvedPlatform,
     HRevisitGuideOptions,
+    HSDKActionCallbacks,
     HSDKActionOptions,
     HSDKActionReason,
     HSDKActionResult,
@@ -20,6 +22,7 @@ import type {
     HSDKLoginResult,
     HSDKRewardPolicy,
     HSDKSessionSaveData,
+    HSDKSourceFlags,
     HScreenAdaptOptions,
     HScreenAdaptResult,
     HScreenInfo,
@@ -71,6 +74,7 @@ export class HSDKFacade {
     private platform: HResolvedPlatform = 'mock';
     private initialized = false;
     private loginResult: HSDKLoginResult | null = null;
+    private sourceFlags: HSDKSourceFlags | null = null;
 
     /**
      * 初始化 SDK。
@@ -103,6 +107,7 @@ export class HSDKFacade {
         this.adapter = this.registry.create(this.platform);
         this.adapter.init(this.config);
         this.sessionTimer?.bindLifecycle(this.adapter);
+        this.sourceFlags = null;
         this.loadSavedSession();
         this.initialized = true;
 
@@ -128,6 +133,7 @@ export class HSDKFacade {
                 completed: ret.ok,
                 rewardable: false,
             };
+            this.refreshSourceFlags();
             this.loginResult = this.cloneLoginForSave(normalized);
             if (this.config.autoSaveLogin !== false) {
                 this.saveSession(true);
@@ -159,6 +165,40 @@ export class HSDKFacade {
         return this.configFacade?.isSDKFeatureEnabled(feature, this.platform, defaultValue) ?? defaultValue;
     }
 
+    // 文档里的 hasAbility 在 H 框架中作为 hasFeature 的语义别名，业务可读性更强。
+    public hasAbility(feature: HSDKFeature): boolean {
+        return this.hasFeature(feature);
+    }
+
+    public getSourceFlags(): HSDKSourceFlags {
+        this.ensureInit();
+        return this.cloneSourceFlags(this.sourceFlags || this.refreshSourceFlags());
+    }
+
+    public get fromSidebar(): boolean {
+        return this.getSourceFlags().fromSidebar;
+    }
+
+    public get fromDesk(): boolean {
+        return this.getSourceFlags().fromDesk;
+    }
+
+    public get fromFeed1(): boolean {
+        return this.getSourceFlags().fromFeed1;
+    }
+
+    public get fromFeed2(): boolean {
+        return this.getSourceFlags().fromFeed2;
+    }
+
+    public restartProgram(): HSDKActionResult {
+        this.ensureInit();
+        if (!this.hasAbility('restart')) {
+            return this.actionFail('restart', 'platform-unsupported');
+        }
+        return this.adapter.restartProgram();
+    }
+
     // 分享菜单是平台级开关，不参与奖励判定；真正分享奖励走 share() 的 rewardable。
     public setShareMenu(options?: HShareMenuOptions): HSDKActionResult {
         this.ensureInit();
@@ -173,6 +213,18 @@ export class HSDKFacade {
     // 平台交互能力统一返回 ok/completed/rewardable，业务发奖励只看 rewardable。
     public share(options: HShareOptions = {}): Promise<HSDKActionResult> {
         return this.runAction('share', options, () => this.adapter.share(options));
+    }
+
+    public copyText(text: string, options: HClipboardOptions = {}): Promise<HSDKActionResult> {
+        return this.runAction('clipboard-copy', options, () => this.adapter.copyText(text, options));
+    }
+
+    public triggerGC(): HSDKActionResult {
+        this.ensureInit();
+        if (!this.hasAbility('gc')) {
+            return this.actionFail('gc', 'platform-unsupported');
+        }
+        return this.adapter.triggerGC();
     }
 
     public showFavoriteGuide(options: HFavoriteGuideOptions = {}): Promise<HSDKActionResult> {
@@ -197,6 +249,96 @@ export class HSDKFacade {
 
     public addShortcut(options: HShortcutOptions = {}): Promise<HSDKActionResult> {
         return this.runAction('shortcut-add', options, () => this.adapter.addShortcut(options));
+    }
+
+    /**
+     * 安全分享入口。
+     *
+     * @param options 分享参数。
+     * @param callbacks 业务只处理 success/fail；平台能力、冷却、状态锁和完成判定由 SDK 内部处理。
+     */
+    public tryShare(options: HShareOptions = {}, callbacks: HSDKActionCallbacks = {}): boolean {
+        return this.tryRunAction('share', 'share', callbacks, () => this.share(options));
+    }
+
+    /**
+     * 安全添加桌面入口。
+     *
+     * @param options 添加桌面参数。
+     * @param callbacks 业务只处理 success/fail。
+     */
+    public tryAddShortcut(options: HShortcutOptions = {}, callbacks: HSDKActionCallbacks = {}): boolean {
+        return this.tryRunAction('shortcut', 'shortcut-add', callbacks, () => this.addShortcut(options));
+    }
+
+    /**
+     * 安全收藏引导入口。
+     *
+     * @param options 收藏引导参数。
+     * @param callbacks 业务只处理 success/fail。
+     */
+    public tryShowFavoriteGuide(options: HFavoriteGuideOptions = {}, callbacks: HSDKActionCallbacks = {}): boolean {
+        return this.tryRunAction('favorite', 'favorite', callbacks, () => this.showFavoriteGuide(options));
+    }
+
+    /**
+     * 安全复访引导入口。
+     *
+     * @param options 复访引导参数。
+     * @param callbacks 业务只处理 success/fail。
+     */
+    public tryShowRevisitGuide(options: HRevisitGuideOptions = {}, callbacks: HSDKActionCallbacks = {}): boolean {
+        return this.tryRunAction('revisit', 'revisit', callbacks, () => this.showRevisitGuide(options));
+    }
+
+    /**
+     * 安全侧边栏入口。内部先 check，再 navigate。
+     *
+     * @param options 侧边栏参数。
+     * @param callbacks 业务只处理 success/fail。
+     */
+    public tryShowSidebar(options: HSidebarOptions = {}, callbacks: HSDKActionCallbacks = {}): boolean {
+        if (!this.hasAbility('sidebar')) {
+            void this.dispatchActionCallbacks(this.actionFail('sidebar-navigate', 'platform-unsupported'), callbacks);
+            return false;
+        }
+
+        void (async () => {
+            try {
+                const check = await this.checkSidebar(options);
+                if (!check.ok || !check.completed) {
+                    await this.dispatchActionCallbacks(check, callbacks);
+                    return;
+                }
+
+                await this.dispatchActionCallbacks(await this.navigateToSidebar(options), callbacks);
+            } catch (error) {
+                await this.dispatchActionCallbacks(this.actionException('sidebar-navigate', error), callbacks);
+            }
+        })();
+
+        return true;
+    }
+
+    /**
+     * 安全复制文本入口。
+     *
+     * @param text 要写入系统剪贴板的文本。
+     * @param callbacks 业务只处理 success/fail。
+     * @param options 剪贴板调用配置。
+     */
+    public tryCopyText(text: string, callbacks: HSDKActionCallbacks = {}, options: HClipboardOptions = {}): boolean {
+        return this.tryRunAction('clipboard', 'clipboard-copy', callbacks, () => this.copyText(text, options));
+    }
+
+    public tryTriggerGC(callbacks: HSDKActionCallbacks = {}): boolean {
+        if (!this.hasAbility('gc')) {
+            void this.dispatchActionCallbacks(this.actionFail('gc', 'platform-unsupported'), callbacks);
+            return false;
+        }
+
+        void this.dispatchActionCallbacks(this.triggerGC(), callbacks);
+        return true;
     }
 
     // 广告相关接口继续委托给 HAdFacade，这里只补 SDK 层的二次冷却保护。
@@ -267,6 +409,12 @@ export class HSDKFacade {
         return this.adFacade!.getAdStats();
     }
 
+    // 广告播放期间平台会暂停游戏；iOS 可能触发 onHide/onShow，业务可以用这个状态过滤误判。
+    public isShowingAd(): boolean {
+        this.ensureInit();
+        return this.adFacade!.isShowingAd();
+    }
+
     public resetAdStats(): void {
         this.ensureInit();
         this.adFacade!.resetAdStats();
@@ -317,6 +465,45 @@ export class HSDKFacade {
         const adapter = new AdapterClass();
         this.registry.registerAdapterClass(AdapterClass);
         this.recreateAdapterIfCurrent(adapter.platform);
+    }
+
+    private tryRunAction(
+        feature: HSDKFeature,
+        action: HSDKActionType,
+        callbacks: HSDKActionCallbacks,
+        task: () => Promise<HSDKActionResult>,
+    ): boolean {
+        if (!this.hasAbility(feature)) {
+            void this.dispatchActionCallbacks(this.actionFail(action, 'platform-unsupported'), callbacks);
+            return false;
+        }
+
+        void task()
+            .then((ret) => this.dispatchActionCallbacks(ret, callbacks))
+            .catch((error) => this.dispatchActionCallbacks(this.actionException(action, error), callbacks));
+
+        return true;
+    }
+
+    private async dispatchActionCallbacks(result: HSDKActionResult, callbacks: HSDKActionCallbacks): Promise<void> {
+        const payload = {
+            action: result.action,
+            platform: result.platform,
+            reason: result.reason,
+            userMessage: result.userMessage,
+            raw: result.raw,
+        };
+
+        try {
+            if (result.ok && result.completed) {
+                await callbacks.success?.(payload);
+                return;
+            }
+
+            await callbacks.fail?.(payload);
+        } catch (error) {
+            console.warn('[HSDKFacade] action callback failed', error);
+        }
     }
 
     private async runAction(
@@ -426,6 +613,7 @@ export class HSDKFacade {
         this.adapter = this.registry.create(this.platform);
         this.adapter.init(this.config);
         this.sessionTimer?.bindLifecycle(this.adapter);
+        this.sourceFlags = null;
     }
 
     // 旧项目兼容用的失败结果构造，保持字段和 HAdRewardResult/HAdShowResult 一致。
@@ -475,9 +663,38 @@ export class HSDKFacade {
             login: this.loginResult ? this.cloneLoginForSave(this.loginResult) : null,
             launchOptions: this.safeClone(this.adapter.getLaunchOptions()),
             enterOptions: this.safeClone(this.adapter.getEnterOptions()),
+            sourceFlags: this.sourceFlags ? this.cloneSourceFlags(this.sourceFlags) : undefined,
             updatedAt: Date.now(),
         };
         this.dataStore.setModule<HSDKSessionSaveData>(this.getSessionModuleName(), data, { immediate });
+    }
+
+    private refreshSourceFlags(): HSDKSourceFlags {
+        try {
+            this.sourceFlags = this.cloneSourceFlags(this.adapter.getSourceFlags());
+        } catch (error) {
+            if (this.config.debug) {
+                console.warn('[HSDKFacade] getSourceFlags failed', error);
+            }
+            this.sourceFlags = {
+                fromSidebar: false,
+                fromDesk: false,
+                fromFeed1: false,
+                fromFeed2: false,
+            };
+        }
+        return this.sourceFlags;
+    }
+
+    private cloneSourceFlags(flags: HSDKSourceFlags): HSDKSourceFlags {
+        return {
+            fromSidebar: !!flags.fromSidebar,
+            fromDesk: !!flags.fromDesk,
+            fromFeed1: !!flags.fromFeed1,
+            fromFeed2: !!flags.fromFeed2,
+            rawLaunchOptions: this.safeClone(flags.rawLaunchOptions),
+            rawEnterOptions: this.safeClone(flags.rawEnterOptions),
+        };
     }
 
     private cloneLoginForSave(login: HSDKLoginResult): HSDKLoginResult {
@@ -530,6 +747,19 @@ export class HSDKFacade {
         };
     }
 
+    private actionException(action: HSDKActionType, error: unknown): HSDKActionResult {
+        return {
+            ok: false,
+            completed: false,
+            rewardable: false,
+            platform: this.platform,
+            action,
+            reason: 'failed',
+            userMessage: this.getErrorMessage(error),
+            raw: error,
+        };
+    }
+
     private getUserMessage(reason?: HSDKActionReason): string {
         switch (reason) {
             case 'busy':
@@ -549,6 +779,16 @@ export class HSDKFacade {
             default:
                 return '功能调用失败，请稍后再试';
         }
+    }
+
+    private getErrorMessage(error: unknown): string {
+        if (error && typeof error === 'object') {
+            return (error as any).message || (error as any).errMsg || 'SDK action failed';
+        }
+        if (typeof error === 'string') {
+            return error;
+        }
+        return 'SDK action failed';
     }
 
     private safeClone<T>(value: T): T | undefined {

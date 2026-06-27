@@ -1,5 +1,5 @@
 import { _decorator } from 'cc';
-import { HUIViewBase } from './HUIViewBase';
+import { HUIBase } from './HUIBase';
 
 const { ccclass } = _decorator;
 
@@ -8,4 +8,4 @@ const { ccclass } = _decorator;
  * 通常由 UIOpenLoadingPolicy 自动打开和关闭，业务不需要手动管理慢加载提示。
  */
 @ccclass('HLoadingView')
-export class HLoadingView<TParams = any> extends HUIViewBase<TParams> {}
+export class HLoadingView<TParams = any> extends HUIBase<TParams> {}

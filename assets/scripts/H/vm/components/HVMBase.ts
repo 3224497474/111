@@ -1,5 +1,6 @@
 import { _decorator, Component } from 'cc';
 import { H } from '../../H';
+import { HLifecycleScope } from '../../core/HLifecycleScope';
 import type { HVMPathLike, HVMTagLike, HVMWatchId, HVMWatchOptions } from '../HVMTypes';
 
 const { ccclass, property } = _decorator;
@@ -32,6 +33,8 @@ export class HVMBase<TValue = unknown> extends Component {
 
     /** 类型 HVMWatchId。作用：保存 H.vm.watch 返回的唯一监听 id，注销时精确移除。 */
     protected watchId: HVMWatchId = 0;
+    private readonly lifecycle = new HLifecycleScope('HVMBase');
+    private watchCleanupId = 0;
 
     /**
      * Cocos 生命周期：组件启用时注册 VM 监听。
@@ -53,7 +56,9 @@ export class HVMBase<TValue = unknown> extends Component {
      * Cocos 生命周期：节点销毁时兜底注销 VM 监听。
      */
     protected onDestroy(): void {
-        this.stopWatch();
+        this.lifecycle.destroy();
+        this.watchId = 0;
+        this.watchCleanupId = 0;
     }
 
     /**
@@ -68,12 +73,30 @@ export class HVMBase<TValue = unknown> extends Component {
             return;
         }
 
-        this.watchId = H.vm.watch<TValue>(
+        const id = H.vm.watch<TValue>(
             tag,
             path,
             (value, oldValue) => this.refreshValue(value, oldValue),
             this.getWatchOptions(),
         );
+
+        let cleanupId = 0;
+        cleanupId = this.lifecycle.add(() => {
+            H.vm.unwatch(id);
+            if (this.watchId === id) {
+                this.watchId = 0;
+            }
+            if (this.watchCleanupId === cleanupId) {
+                this.watchCleanupId = 0;
+            }
+        }, {
+            scope: 'disable',
+            kind: 'vm-watch',
+            label: H.vm.path(tag, path),
+        });
+
+        this.watchId = id;
+        this.watchCleanupId = cleanupId;
     }
 
     /**
@@ -81,6 +104,11 @@ export class HVMBase<TValue = unknown> extends Component {
      */
     public stopWatch(): void {
         if (!this.watchId) {
+            return;
+        }
+
+        if (this.watchCleanupId) {
+            this.lifecycle.remove(this.watchCleanupId);
             return;
         }
 

@@ -336,7 +336,10 @@ export type HSDKActionType =
     | 'sidebar-check'
     | 'sidebar-navigate'
     | 'shortcut-check'
-    | 'shortcut-add';
+    | 'shortcut-add'
+    | 'clipboard-copy'
+    | 'restart'
+    | 'gc';
 
 export type HSDKActionReason =
     | 'busy'
@@ -362,6 +365,19 @@ export interface HSDKActionResult {
     errorCode?: string | number;
     errorMessage?: string;
     raw?: unknown;
+}
+
+export interface HSDKActionCallbackPayload {
+    action: HSDKActionType;
+    platform: HResolvedPlatform;
+    reason?: HSDKActionReason;
+    userMessage?: string;
+    raw?: unknown;
+}
+
+export interface HSDKActionCallbacks {
+    success?: (payload: HSDKActionCallbackPayload) => void | Promise<void>;
+    fail?: (payload: HSDKActionCallbackPayload) => void | Promise<void>;
 }
 
 export interface HSDKLoginResult extends HSDKActionResult {
@@ -418,6 +434,10 @@ export interface HShortcutOptions extends HSDKActionOptions {
     extra?: Record<string, unknown>;
 }
 
+export interface HClipboardOptions extends HSDKActionOptions {
+    extra?: Record<string, unknown>;
+}
+
 export interface HSDKInitOptions {
     debug?: boolean;
     actionTimeoutMs?: number;
@@ -433,7 +453,17 @@ export interface HSDKSessionSaveData {
     login: HSDKLoginResult | null;
     launchOptions?: unknown;
     enterOptions?: unknown;
+    sourceFlags?: HSDKSourceFlags;
     updatedAt: number;
+}
+
+export interface HSDKSourceFlags {
+    fromSidebar: boolean;
+    fromDesk: boolean;
+    fromFeed1: boolean;
+    fromFeed2: boolean;
+    rawLaunchOptions?: unknown;
+    rawEnterOptions?: unknown;
 }
 
 export type HSDKFeature =
@@ -448,6 +478,12 @@ export type HSDKFeature =
     | 'shortcut'
     | 'recordVideo'
     | 'leaderboard'
+    | 'clipboard'
+    | 'restart'
+    | 'gc'
+    | 'feed'
+    | 'gameClub'
+    | 'userPreLevel'
     | 'payment'
     | 'customerService';
 
@@ -545,6 +581,18 @@ export interface HRewardResult {
     reason?: HRewardReason;
     userMessage?: string;
     raw?: unknown;
+}
+
+export interface HRewardCallbackPayload {
+    rewardScene: string;
+    rewardId: string;
+    reason?: HRewardReason;
+    userMessage?: string;
+}
+
+export interface HRewardCallbacks {
+    success?: (payload: HRewardCallbackPayload) => void | Promise<void>;
+    fail?: (payload: HRewardCallbackPayload) => void | Promise<void>;
 }
 
 export interface HRewardBaseOptions {
